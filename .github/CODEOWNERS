@@ -1,0 +1,3 @@
+# Default code owner for the entire repository.
+# Any pull request that changes files will request review from this owner.
+* @SetapScalp
