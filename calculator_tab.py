@@ -750,6 +750,13 @@ def init_calculator_tab(app):
     app.on_cells_changed()
     app.update_calibration_status()
     app.update_position_adjustment_info()
-    app._update_pf_multi_glass_ui()
+    app.lbl_status.setText("")
+    QTimer.singleShot(
+        0,
+        lambda: (
+            app.inp_dep.clearFocus(),
+            app.tab_calculator.setFocus(Qt.FocusReason.OtherFocusReason),
+        ),
+    )
     # Вызываем один раз при инициализации для показа статуса
     QTimer.singleShot(100, app._update_status_text)
