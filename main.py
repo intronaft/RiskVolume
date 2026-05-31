@@ -11,6 +11,17 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# Setup logging to debug file before any heavy operations
+import logging
+_log_file = os.path.join(os.path.dirname(__file__), "rv_debug.log")
+logging.basicConfig(
+    filename=_log_file,
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='w'
+)
+logging.debug("Application startup begin")
+
 import json
 import time
 import hmac
@@ -35,7 +46,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QHBoxLayout,
     QPushButton,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QComboBox,
@@ -74,7 +84,6 @@ from config import *
 from settings_dialog import SettingsDialog
 from logic import calculate_risk_data, calculate_position_adjustment, get_info_html
 from translations import TRANS
-from cascade_tab import CascadeTab
 from calculator_tab import init_calculator_tab
 from secure_credentials import protect_secret, unprotect_secret
 
@@ -352,14 +361,19 @@ class GlassPreviewFrame(QWidget):
 
 class RiskVolumeApp(QMainWindow):
     def __init__(self):
+        logging.debug("RiskVolumeApp.__init__ START")
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
         )
+        logging.debug("QMainWindow.__init__ done")
         self._startup_reveal_done = False
         self.base_scale = 100
+        logging.debug("About to load_settings")
         self.load_settings()
+        logging.debug("load_settings done")
         self._create_posmode_checkmark_icon()
+        logging.debug("checkmark icon created")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         try:
             self.setWindowOpacity(0.0)
@@ -422,6 +436,7 @@ class RiskVolumeApp(QMainWindow):
         self._startup_window_suppress_deadline = 0.0
 
         self.init_ui()
+        logging.debug("init_ui completed, setting up timers")
         self._calc_update_timer = QTimer(self)
         self._calc_update_timer.setSingleShot(True)
         self._calc_update_timer.timeout.connect(self.update_calc)
@@ -432,11 +447,13 @@ class RiskVolumeApp(QMainWindow):
         self._smooth_resize_idle_timer.setSingleShot(True)
         self._smooth_resize_idle_timer.timeout.connect(self._apply_idle_smooth_resize)
         self.update_calc()
+        logging.debug("timers setup done")
 
         # Периодически перерегистрируем keyboard-хуки (Windows убивает их при простое/сне)
         self._hotkey_keepalive_timer = QTimer(self)
         self._hotkey_keepalive_timer.timeout.connect(self._keepalive_hotkeys)
         self._hotkey_keepalive_timer.start(60 * 1000)  # каждые 60 секунд
+        logging.debug("RiskVolumeApp.__init__ COMPLETE")
 
         # Периодическая синхронизация депозита через API (если включено)
         self._auto_dep_sync_busy = False
@@ -585,7 +602,7 @@ class RiskVolumeApp(QMainWindow):
             "auto_dep_connected_exchange": "",
             "auto_dep_connected_market": "",
             "auto_dep_allow_unverified": False,
-            "auto_apply_terminal": "profit_forge",
+            "auto_apply_terminal": "metascalp",
             "calc_points_profit_forge": [],
             "calc_points_metascalp": [],
             "calc_points_tigertrade": [],
@@ -715,6 +732,9 @@ class RiskVolumeApp(QMainWindow):
             self.save_settings()
 
     def save_settings(self):
+        # Only sync UI state if we're already initialized (tabs exist)
+        if hasattr(self, "tabs"):
+            self._sync_ui_state_to_settings()
         self.settings["auto_dep_api_key"] = ""
         self.settings["auto_dep_api_secret"] = ""
         self.settings["auto_dep_api_passphrase"] = ""
@@ -722,6 +742,37 @@ class RiskVolumeApp(QMainWindow):
             self.settings["auto_dep_credentials"] = {}
         with open(CONFIG_FILE, "w") as f:
             json.dump(self.settings, f)
+
+    def _sync_ui_state_to_settings(self):
+        """Синхронизирует состояние UI виджетов в settings перед сохранением."""
+        if hasattr(self, "chk_pos_mode"):
+            self.settings["pos_mode_enabled"] = bool(self.chk_pos_mode.isChecked())
+
+        if hasattr(self, "chk_pf_show_frames"):
+            self.settings["pf_show_preview_frames"] = bool(
+                self.chk_pf_show_frames.isChecked()
+            )
+
+        if hasattr(self, "cb_pf_calib_glass"):
+            try:
+                active_glass = int(self.cb_pf_calib_glass.currentData() or 1)
+            except Exception:
+                active_glass = 1
+            self.settings["pf_active_glass"] = active_glass
+            self.settings[self._get_shared_active_points_key()] = self._get_pf_points_for_glass(
+                active_glass
+            )
+
+        if hasattr(self, "_pf_target_checkboxes"):
+            selected_glasses = [
+                int(g)
+                for g, cb in self._pf_target_checkboxes.items()
+                if cb and cb.isChecked() and not bool(cb.property("uncalibrated"))
+            ]
+            self.settings["pf_selected_glasses"] = selected_glasses
+
+        if hasattr(self, "chk_range_mode"):
+            self.settings["cas_range_mode"] = bool(self.chk_range_mode.isChecked())
 
     def _secure_encrypt_field(self, value):
         value = str(value or "").strip()
@@ -744,7 +795,15 @@ class RiskVolumeApp(QMainWindow):
         if not isinstance(raw, dict):
             raw = {}
         result = {}
-        for exchange_id in ["binance", "bybit", "okx", "gate", "bitget", "mexc", "kucoin"]:
+        for exchange_id in [
+            "binance",
+            "bybit",
+            "okx",
+            "gate",
+            "bitget",
+            "mexc",
+            "kucoin",
+        ]:
             src = raw.get(exchange_id, {})
             if not isinstance(src, dict):
                 src = {}
@@ -753,6 +812,7 @@ class RiskVolumeApp(QMainWindow):
                 "api_secret": str(src.get("api_secret", "") or ""),
                 "api_passphrase": str(src.get("api_passphrase", "") or ""),
             }
+
         return result
 
     def get_auto_dep_credentials_plain(self):
@@ -853,7 +913,8 @@ class RiskVolumeApp(QMainWindow):
         if not api_key or not api_secret:
             return False, "Empty API key/secret"
 
-        if exchange_id != "binance":
+        mapped_exchange_id = self._map_auto_dep_exchange_id(exchange_id)
+        if mapped_exchange_id != "binance":
             # For non-Binance exchanges we cannot reliably infer permissions via one unified API.
             return True, ""
 
@@ -1058,9 +1119,12 @@ class RiskVolumeApp(QMainWindow):
             return
         self._sync_deposit_from_exchange(manual=True)
 
+    def _map_auto_dep_exchange_id(self, exchange_id):
+        return str(exchange_id or "").strip().lower()
+
     def _get_auto_dep_credentials(self, exchange_id):
         creds_map = self.get_auto_dep_credentials_plain()
-        ex_creds = creds_map.get(str(exchange_id or "").strip().lower(), {})
+        ex_creds = creds_map.get(self._map_auto_dep_exchange_id(exchange_id), {})
         api_key = str(ex_creds.get("api_key", "") or "").strip()
         api_secret = str(ex_creds.get("api_secret", "") or "").strip()
         api_passphrase = str(ex_creds.get("api_passphrase", "") or "").strip()
@@ -1120,7 +1184,8 @@ class RiskVolumeApp(QMainWindow):
         asset,
         passphrase="",
     ):
-        if exchange_id == "binance":
+        mapped_exchange_id = self._map_auto_dep_exchange_id(exchange_id)
+        if mapped_exchange_id == "binance":
             return self._fetch_binance_balance_light(
                 api_key,
                 api_secret,
@@ -1129,13 +1194,14 @@ class RiskVolumeApp(QMainWindow):
             )
 
         return self._fetch_non_binance_balance_light(
-            exchange_id,
+            mapped_exchange_id,
             api_key,
             api_secret,
             market_type,
             asset,
             passphrase,
         )
+
 
     def _fetch_non_binance_balance_light(
         self,
@@ -1186,7 +1252,7 @@ class RiskVolumeApp(QMainWindow):
 
         return float(result.get("balance", 0.0) or 0.0)
 
-    def _fetch_binance_balance_light(self, api_key, api_secret, market_type, asset):
+    def _fetch_binance_balance_light(self, api_key, api_secret, market_type, asset, base_url=None):
         timestamp_ms = int(time.time() * 1000)
         params = {
             "timestamp": timestamp_ms,
@@ -1199,9 +1265,11 @@ class RiskVolumeApp(QMainWindow):
             hashlib.sha256,
         ).hexdigest()
         headers = {"X-MBX-APIKEY": api_key}
-
         if market_type == "futures":
-            url = f"https://fapi.binance.com/fapi/v2/account?{query}&signature={signature}"
+            if base_url:
+                url = f"{base_url.rstrip('/')}/fapi/v2/account?{query}&signature={signature}"
+            else:
+                url = f"https://fapi.binance.com/fapi/v2/account?{query}&signature={signature}"
             response = requests.get(url, headers=headers, timeout=4)
             response.raise_for_status()
             data = response.json()
@@ -1214,7 +1282,10 @@ class RiskVolumeApp(QMainWindow):
                     return float(row.get("walletBalance", 0.0) or 0.0)
             return 0.0
 
-        url = f"https://api.binance.com/api/v3/account?{query}&signature={signature}"
+        if base_url:
+            url = f"{base_url.rstrip('/')}/api/v3/account?{query}&signature={signature}"
+        else:
+            url = f"https://api.binance.com/api/v3/account?{query}&signature={signature}"
         response = requests.get(url, headers=headers, timeout=4)
         response.raise_for_status()
         data = response.json()
@@ -1283,9 +1354,11 @@ class RiskVolumeApp(QMainWindow):
         worker.start()
 
     def init_ui(self):
+        logging.debug("init_ui START")
         self.central_widget = QWidget()
         self.central_widget.setObjectName("Root")
         self.setCentralWidget(self.central_widget)
+        logging.debug("central widget set")
 
         self.main_layout = QVBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
@@ -1414,50 +1487,24 @@ class RiskVolumeApp(QMainWindow):
         self.main_layout.addSpacing(10)
 
         # --- ВКЛАДКИ ---
-        self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(
-            """
-            QTabWidget::pane { border: none; }
-            QTabBar::tab { background: #333; color: #888; padding: 5px 10px; border-radius: 4px; margin-right: 2px; }
-            QTabBar::tab:selected { background: #38BE1D; color: black; font-weight: bold; }
-        """
-        )
-
         t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
         self.tab_calculator = QWidget()
         self.init_calculator_tab()
         self.tab_calculator.installEventFilter(self)
-        self.tabs.addTab(self.tab_calculator, t.get("tab_calc", "Калькулятор"))
-
-        self.tab_cascade = CascadeTab(self)
-        self.tab_cascade.installEventFilter(self)
-        self.tabs.addTab(self.tab_cascade, t.get("tab_casc", "Каскады"))
         self.installEventFilter(self)
 
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-
-        self.main_layout.addWidget(self.tabs)
-
-        self._apply_terminal_mode()
+        self.main_layout.addWidget(self.tab_calculator)
 
         self.apply_min_order_precision()
         self.refresh_labels()
         self.apply_styles()
         # Finalize geometry before the first show to avoid startup flicker.
         self.finalize_startup_layout()
-
-    def on_tab_changed(self, index):
-        if index == 1 and not self._is_profit_forge_terminal():
-            self.tabs.blockSignals(True)
-            self.tabs.setCurrentIndex(0)
-            self.tabs.blockSignals(False)
-            return
-        if index == 1 and hasattr(self, "tab_cascade"):
-            self.tab_cascade.recalc_table()
+        logging.debug("init_ui DONE - UI fully initialized")
 
     def _is_profit_forge_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
+            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
             .strip()
             .lower()
             == "profit_forge"
@@ -1465,7 +1512,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_tigertrade_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
+            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
             .strip()
             .lower()
             == "tigertrade"
@@ -1473,7 +1520,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_metascalp_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
+            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
             .strip()
             .lower()
             == "metascalp"
@@ -1481,7 +1528,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_surf_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
+            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
             .strip()
             .lower()
             == "surf"
@@ -1489,7 +1536,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_vataga_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
+            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
             .strip()
             .lower()
             == "vataga"
@@ -1843,6 +1890,7 @@ class RiskVolumeApp(QMainWindow):
                     glass = int(raw_glass)
                 except Exception:
                     continue
+                if 1 <= glass <= count and glass not in selected:
                     selected.append(glass)
 
         if self.settings.get("pf_selected_glasses") != selected:
@@ -2429,18 +2477,6 @@ class RiskVolumeApp(QMainWindow):
         self.save_settings()
 
     def _apply_terminal_mode(self):
-        if not hasattr(self, "tabs"):
-            return
-
-        is_pf = self._is_profit_forge_terminal()
-        if hasattr(self, "tab_cascade"):
-            self.tab_cascade.setEnabled(is_pf)
-
-        self.tabs.setTabEnabled(1, is_pf)
-
-        if not is_pf and self.tabs.currentIndex() == 1:
-            self.tabs.setCurrentIndex(0)
-
         if hasattr(self, "update_calc"):
             self.update_calc()
         if hasattr(self, "update_position_adjustment_info"):
@@ -3077,11 +3113,7 @@ class RiskVolumeApp(QMainWindow):
         self._apply_volume_title_style(
             dimmed=bool(self.settings.get("pos_mode_enabled", False))
         )
-        self.tabs.setTabText(0, t.get("tab_calc", "Калькулятор"))
-        self.tabs.setTabText(1, t.get("tab_casc", "Каскады"))
         self.refresh_calculator_labels()
-        if hasattr(self, "tab_cascade"):
-            self.tab_cascade.refresh_labels()
 
     def refresh_calculator_labels(self):
         t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
@@ -4389,7 +4421,7 @@ class RiskVolumeApp(QMainWindow):
             return "0"
 
     def apply_styles(self):
-
+        logging.debug("apply_styles START")
         scale = self.settings.get("scale", self.base_scale)
         scale = max(60, min(120, int(scale)))
         ratio = scale / float(self.base_scale)
@@ -4401,6 +4433,7 @@ class RiskVolumeApp(QMainWindow):
         if compact_60:
             input_font = max(input_font, 9)
         f_small = max(7, int(8.5 * ratio))
+        logging.debug("apply_styles scales calculated")
         # Compress padding growth for large scales to avoid oversized inner gaps.
         pad_ratio = 1.0 + max(0.0, ratio - 1.0) * 0.55
         pad_main = max(1, int(3 * pad_ratio))
@@ -4823,28 +4856,13 @@ class RiskVolumeApp(QMainWindow):
             if not self.is_cursor_over_window():
                 return
 
-            # ПРОВЕРЯЕМ, КАКАЯ ВКЛАДКА ОТКРЫТА
-            current_idx = self.tabs.currentIndex()
-
-            if current_idx == 0:
-                # Вкладка калькулятора -> обновляем расчёт и вставляем объем
-                self.update_calc()
-                self.send_volume_to_terminal()
-            elif current_idx == 1:
-                # Вкладка каскадов -> выставляем ордера
-                self.tab_cascade.run_automation()
+                # Обновляем расчёт и вставляем объем
+            self.update_calc()
+            self.send_volume_to_terminal()
         finally:
             self.apply_running = False
 
     def handle_hotkey_calibration(self):
-        if not hasattr(self, "tabs"):
-            return
-
-        current_idx = self.tabs.currentIndex()
-        if current_idx == 1 and hasattr(self, "tab_cascade"):
-            self.tab_cascade.handle_calibration_hotkey()
-            return
-
         self.capture_coords()
 
     def _cancel_active_calibration(self):
@@ -4869,6 +4887,11 @@ class RiskVolumeApp(QMainWindow):
 
     # Обработка нажатия Enter на клавиатуре (когда фокус в программе)
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F2:
+            if not hasattr(self, "tabs") or self.tabs.currentIndex() == 0:
+                self.capture_coords()
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):
@@ -5202,39 +5225,12 @@ class RiskVolumeApp(QMainWindow):
         if len(points) >= cells_count:
             self.calc_calibration_active = False
             t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
-            if self._is_profit_forge_terminal() and self._get_pf_glasses_count() > 1:
-                ready_text = t.get(
-                    "calc_calib_exists_glass",
-                    "✓ Калибровка уже есть: {cells} ячеек ({glass})",
-                ).format(cells=cells_count, glass=self._pf_glass_label(self._get_pf_active_glass()))
-            else:
-                ready_text = t["calc_calib_exists"].format(cells=cells_count)
+            ready_text = t["calc_calib_exists"].format(cells=cells_count)
             self._set_ready_status_with_neutral_timeout(ready_text)
             self.update_calibration_status()
             return
 
         self.calc_calibration_active = True
-
-        # Показываем подробную инструкцию
-        t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
-        if self._is_profit_forge_terminal() and self._get_pf_glasses_count() > 1:
-            instruction = t.get(
-                "calc_calib_instruction_glass",
-                "Калибровка активирована для {glass}.\n\nЗахвати {cells} ячеек выбора объема, нажимая {hotkey} по порядку.",
-            ).format(
-                glass=self._pf_glass_label(self._get_pf_active_glass()),
-                cells=cells_count,
-                hotkey=hk_coords,
-            )
-        else:
-            instruction = t["calc_calib_instruction"].format(
-                cells=cells_count, hotkey=hk_coords
-            )
-
-        self.lbl_status.setText(instruction)
-        self.lbl_status.setStyleSheet(
-            "color: #FFD700; font-size: 6pt; line-height: 130%;"
-        )
         self.update_calibration_status()
 
     def capture_coords(self):
@@ -5358,8 +5354,8 @@ class RiskVolumeApp(QMainWindow):
 
     def update_calibration_status(self):
         """Обновляет подсказку о калибровке при переключении вкладок"""
-        # Обновляем только если мы на вкладке калькулятора
-        if hasattr(self, "tabs") and self.tabs.currentIndex() == 0:
+        # Обновляем, если мы на вкладке калькулятора или если вкладок вообще нет.
+        if not hasattr(self, "tabs") or self.tabs.currentIndex() == 0:
             self._update_status_text()
 
     def _set_ready_status_with_neutral_timeout(self, text, ready_color="#38BE1D", delay_ms=5000):
@@ -5485,14 +5481,7 @@ class RiskVolumeApp(QMainWindow):
                 )
                 self.lbl_status.setStyleSheet(f"color: cyan; font-size: {status_pt}pt;")
             else:
-                t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
-                self.lbl_status.setText(
-                    t.get(
-                        "calc_need_start",
-                        "Нужно выполнить калибровку, для начала нажми {hotkey}",
-                    ).format(hotkey=hk_coords)
-                    + (pf_status_suffix if pf_status_suffix else "")
-                )
+                self.lbl_status.setText("")
                 self.lbl_status.setStyleSheet(f"color: #666; font-size: {status_pt}pt;")
         elif points_count < cells_count:
             t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
@@ -6015,10 +6004,15 @@ class RiskVolumeApp(QMainWindow):
         self.save_cell_settings()
 
     def finalize_startup_layout(self):
+        logging.debug("finalize_startup_layout START")
         self.update_cells_table_height()
+        logging.debug("update_cells_table_height done")
         self._adapt_window_width_to_content()
+        logging.debug("_adapt_window_width_to_content done")
         self._set_window_size_with_extra_height()
+        logging.debug("_set_window_size_with_extra_height done")
         self._ensure_window_on_screen(margin=6, prefer_active=True)
+        logging.debug("_ensure_window_on_screen done")
         if self._startup_window_size is None:
             self._startup_window_size = (int(self.width()), int(self.height()))
         if not self._resize_len_baseline:
@@ -6395,29 +6389,19 @@ class RiskVolumeApp(QMainWindow):
             pos = e.globalPosition().toPoint()
             self._clear_ghost_focus()
 
-            # На вкладках калькулятора и каскадов - разрешаем везде кроме интерактивных элементов
-            if hasattr(self, "tabs") and self.tabs.currentIndex() in (0, 1):
-                # Проверяем что клик не попал на интерактивный элемент
-                widget = self.childAt(self.mapFromGlobal(pos))
+            # Разрешаем перетаскивание по свободным участкам окна
+            widget = self.childAt(self.mapFromGlobal(pos))
+            non_draggable_types = (
+                QLineEdit,
+                QPushButton,
+                QComboBox,
+                QCheckBox,
+                QTableWidget,
+                QSpinBox,
+                QDoubleSpinBox,
+            )
 
-                # Разрешаем перетаскивание если клик не на таких элементах
-                non_draggable_types = (
-                    QLineEdit,
-                    QPushButton,
-                    QComboBox,
-                    QCheckBox,
-                    QTableWidget,
-                    QSpinBox,
-                    QDoubleSpinBox,
-                )
-
-                if not widget or not isinstance(widget, non_draggable_types):
-                    # Клик в пустое место - очищаем ghost focus
-                    self.old_pos = pos
-                else:
-                    self.old_pos = None
-            # На других вкладках - только по верхней полосе
-            elif pos.y() < 30:
+            if not widget or not isinstance(widget, non_draggable_types):
                 self.old_pos = pos
             else:
                 self.old_pos = None
@@ -6725,8 +6709,7 @@ class RiskVolumeApp(QMainWindow):
                 return True
         if (
             hasattr(self, "tab_calculator")
-            and hasattr(self, "tab_cascade")
-            and obj in (self.tab_calculator, self.tab_cascade)
+            and obj is self.tab_calculator
             and event.type() == event.Type.MouseButtonPress
         ):
             self._clear_ghost_focus()
@@ -6784,34 +6767,28 @@ class RiskVolumeApp(QMainWindow):
             self.settings["pos_table_volume_override"] = float(
                 getattr(self, "table_volume_override", 0.0) or 0.0
             )
-            self.save_cell_settings()
-        except Exception:
-            pass
-
-    def _reveal_startup_window(self):
-        if self._startup_reveal_done:
-            return
-        self._startup_reveal_done = True
-        try:
-            self.setWindowOpacity(1.0)
-        except Exception:
-            pass
-        self._start_startup_window_suppression()
-        if not self._hotkeys_initialized:
             try:
-                self.rebind_hotkeys()
-                self._hotkeys_initialized = True
+                self.save_cell_settings()
             except Exception:
-                pass
-        try:
-            self._apply_auto_deposit_sync(force_now=True)
+                self.save_settings()
         except Exception:
-            pass
+            self.save_settings()
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self._startup_reveal_done:
             QTimer.singleShot(0, self._reveal_startup_window)
+
+    def _reveal_startup_window(self):
+        """Reveal the window by restoring opacity from 0 to 1"""
+        logging.debug("_reveal_startup_window: Revealing window")
+        try:
+            self.setWindowOpacity(1.0)
+            self._startup_reveal_done = True
+            logging.debug("_reveal_startup_window: Window opacity set to 1.0")
+        except Exception as e:
+            logging.debug(f"_reveal_startup_window: Error - {e}")
+            self._startup_reveal_done = True
 
     def _start_startup_window_suppression(self):
         if sys.platform != "win32":
@@ -6870,10 +6847,13 @@ class RiskVolumeApp(QMainWindow):
 
 
 if __name__ == "__main__":
+    logging.debug("=== Application startup ===")
     multiprocessing.freeze_support()
-    _relaunch_with_pythonw_if_needed()
+    logging.debug("freeze_support done")
     _hide_console_window_on_windows()
+    logging.debug("console hidden")
     _configure_windows_multiprocessing_executable()
+    logging.debug("multiprocessing configured")
     existing_qt_rules = os.environ.get("QT_LOGGING_RULES", "")
     dpi_noise_rule = "qt.qpa.window.warning=false"
     if dpi_noise_rule not in existing_qt_rules:
@@ -6884,22 +6864,33 @@ if __name__ == "__main__":
         )
 
     # Защита от множественного запуска
+    logging.debug("Creating shared memory")
     shared_memory = QSharedMemory("RiskVolume_single_instance_v1")
     if not shared_memory.create(1):
+        logging.debug("Shared memory already exists - another instance running")
         # Пытаемся очистить "зависший" сегмент и выходим, если уже запущено
         if shared_memory.attach():
             shared_memory.detach()
         if not shared_memory.create(1):
+            logging.debug("Exiting - another instance already running")
             sys.exit(0)
     _app_shared_memory_guard = shared_memory
+    logging.debug("Shared memory created successfully")
 
+    logging.debug("Creating QApplication")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    logging.debug("QApplication created, setting theme")
     _force_consistent_qt_theme(app)
+    logging.debug("Theme set, creating RiskVolumeApp window")
     win = RiskVolumeApp()
+    logging.debug("RiskVolumeApp window created")
 
     def _show_main_window():
+        logging.debug("Showing main window")
         win.show()
+        logging.debug("Main window shown")
 
     QTimer.singleShot(0, _show_main_window)
+    logging.debug("Starting event loop")
     sys.exit(app.exec())
