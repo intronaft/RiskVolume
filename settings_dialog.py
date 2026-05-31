@@ -599,7 +599,15 @@ class SettingsDialog(QDialog):
             "kucoin",
         ]
         self.cb_auto_dep_exchange.addItems(
-            ["Binance", "Bybit", "OKX", "Gate", "Bitget", "MEXC", "Kucoin"]
+            [
+                "Binance",
+                "Bybit",
+                "OKX",
+                "Gate",
+                "Bitget",
+                "MEXC",
+                "KuCoin",
+            ]
         )
         self._enable_combo_popup_hover_highlight(self.cb_auto_dep_exchange)
         if hasattr(parent, "get_auto_dep_credentials_plain"):
@@ -609,6 +617,8 @@ class SettingsDialog(QDialog):
                 parent.settings
             )
         saved_exchange = str(parent.settings.get("auto_dep_exchange", "binance"))
+        if saved_exchange not in self._auto_dep_exchange_values:
+            saved_exchange = "binance"
         try:
             self.cb_auto_dep_exchange.setCurrentIndex(
                 self._auto_dep_exchange_values.index(saved_exchange)
@@ -759,6 +769,7 @@ class SettingsDialog(QDialog):
         grid.addWidget(self.lbl_auto_dep_market, row, 0)
         grid.addWidget(self.cb_auto_dep_market, row, 1)
         row += 1
+        self._update_auto_dep_market_visibility()
 
         self.lbl_auto_dep_asset = QLabel(t["auto_dep_asset"])
         grid.addWidget(self.lbl_auto_dep_asset, row, 0)
@@ -779,6 +790,8 @@ class SettingsDialog(QDialog):
         grid.addWidget(self.lbl_auto_dep_api_passphrase, row, 0)
         grid.addWidget(self.inp_auto_dep_api_passphrase, row, 1)
         row += 1
+
+        
 
         self.lbl_auto_dep_connect_state = QLabel("")
         self.lbl_auto_dep_connect_state.setStyleSheet(
@@ -815,6 +828,7 @@ class SettingsDialog(QDialog):
         connect_row.addWidget(self.lbl_auto_dep_connect_state)
         connect_row.addStretch()
         connect_row.addWidget(self.btn_auto_dep_connect)
+        
 
         connect_container = QWidget()
         connect_container.setStyleSheet("background: transparent;")
@@ -831,7 +845,7 @@ class SettingsDialog(QDialog):
             self.lbl_auto_dep_asset,
             self.lbl_auto_dep_api_key,
             self.lbl_auto_dep_api_secret,
-            self.lbl_auto_dep_api_passphrase,
+            self.inp_auto_dep_api_passphrase,
             self.lbl_auto_dep_connect_state,
             self.cb_auto_dep_exchange,
             self.cb_auto_dep_market,
@@ -895,9 +909,7 @@ class SettingsDialog(QDialog):
         self.cb_apply_terminal = NoWheelComboBox()
         self.cb_apply_terminal.setObjectName("LangCombo")
         self._apply_terminal_values = ["profit_forge", "metascalp", "tigertrade", "surf", "vataga"]
-        self.cb_apply_terminal.addItem(
-            t.get("terminal_profit_forge", "Profit Forge")
-        )
+        self.cb_apply_terminal.addItem(t.get("terminal_profit_forge", "Profit Forge"))
         self.cb_apply_terminal.addItem(t.get("terminal_metascalp", "MetaScalp"))
         self.cb_apply_terminal.addItem(t.get("terminal_tigertrade", "TigerTrade"))
         self.cb_apply_terminal.addItem(t.get("terminal_surf", "SURF"))
@@ -1181,7 +1193,7 @@ class SettingsDialog(QDialog):
 
         if not ok:
             allow_unverified = False
-            if selected_exchange == "binance" and allow_broker_prompt:
+            if selected_exchange in ("binance",) and allow_broker_prompt:
                 msg = t.get(
                     "auto_dep_connect_broker_prompt",
                     "Could not verify permissions via Binance API. If you use broker keys, continue with unverified connection?",
@@ -1307,10 +1319,18 @@ class SettingsDialog(QDialog):
         ]
         self._active_auto_dep_exchange = new_exchange
         self._load_auto_dep_credentials_for_exchange(new_exchange)
+        self._update_auto_dep_market_visibility()
         self._auto_dep_reconnect_for_selection()
+
+    def _update_auto_dep_market_visibility(self):
+        # Show market selector for all supported exchanges
+        self.lbl_auto_dep_market.setVisible(True)
+        self.cb_auto_dep_market.setVisible(True)
 
     def _on_auto_dep_market_changed(self, *_):
         self._auto_dep_reconnect_for_selection()
+
+    
 
     def _preview_fee_change(self):
         if not self.parent_window:
@@ -1553,6 +1573,14 @@ class SettingsDialog(QDialog):
                     )
                 if hasattr(self.parent_window, "_ensure_window_on_screen"):
                     self.parent_window._ensure_window_on_screen(margin=6, prefer_active=True)
+            except Exception:
+                pass
+
+        if self.parent_window is not None:
+            try:
+                self.parent_window.activateWindow()
+                self.parent_window.raise_()
+                self.parent_window.setFocus(Qt.FocusReason.OtherFocusReason)
             except Exception:
                 pass
 
