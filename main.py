@@ -453,6 +453,11 @@ class RiskVolumeApp(QMainWindow):
         self._hotkey_keepalive_timer = QTimer(self)
         self._hotkey_keepalive_timer.timeout.connect(self._keepalive_hotkeys)
         self._hotkey_keepalive_timer.start(60 * 1000)  # каждые 60 секунд
+        # Регистрируем горячие клавиши сразу при старте
+        try:
+            self.rebind_hotkeys()
+        except Exception:
+            pass
         logging.debug("RiskVolumeApp.__init__ COMPLETE")
 
         # Периодическая синхронизация депозита через API (если включено)
@@ -1010,6 +1015,14 @@ class RiskVolumeApp(QMainWindow):
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
             return
+        # Иногда при открытии диалога настроек Windows кратковременно показывает
+        # консольное окно другого дочернего окна процесса. Попробуем скрыть
+        # все лишние окна прямо перед созданием диалога и ещё раз через короткую
+        # задержку после показа, чтобы погасить возможные импульсные консоли.
+        try:
+            _hide_console_window_on_windows()
+        except Exception:
+            pass
 
         dlg = SettingsDialog(self)
         dlg.setModal(False)
@@ -1017,6 +1030,12 @@ class RiskVolumeApp(QMainWindow):
         dlg.finished.connect(self._on_settings_dialog_finished)
         self._settings_dialog = dlg
         dlg.show()
+        try:
+            from PyQt6.QtCore import QTimer
+
+            QTimer.singleShot(50, _hide_console_window_on_windows)
+        except Exception:
+            pass
         dlg.raise_()
         dlg.activateWindow()
 
