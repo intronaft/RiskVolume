@@ -449,7 +449,10 @@ def init_calculator_tab(app):
     app.lbl_min_order_title = QLabel(t["calc_min_order"])
     app.lbl_min_order_title.setStyleSheet("font-size: 8pt;")
     cells_header.addWidget(app.lbl_min_order_title)
-    min_order_val = int(float(app.settings.get("scalp_min_order", 6) or 6))
+    try:
+        min_order_val = int(float(app.settings.get("scalp_min_order")))
+    except:
+        min_order_val = 6
     app.inp_min_order = QLineEdit(str(min_order_val))
     app.inp_min_order.setValidator(
         QRegularExpressionValidator(QRegularExpression(r"[0-9]*"))
