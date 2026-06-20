@@ -452,7 +452,7 @@ class RiskVolumeApp(QMainWindow):
         # Периодически перерегистрируем keyboard-хуки (Windows убивает их при простое/сне)
         self._hotkey_keepalive_timer = QTimer(self)
         self._hotkey_keepalive_timer.timeout.connect(self._keepalive_hotkeys)
-        self._hotkey_keepalive_timer.start(60 * 1000)  # каждые 60 секунд
+        self._hotkey_keepalive_timer.start(30 * 1000)  # каждые 30 секунд
         # Регистрируем горячие клавиши сразу при старте
         try:
             self.rebind_hotkeys()
@@ -465,8 +465,8 @@ class RiskVolumeApp(QMainWindow):
         self._auto_dep_timer = QTimer(self)
         self._auto_dep_timer.setSingleShot(False)
         self._auto_dep_timer.timeout.connect(self._sync_deposit_from_exchange)
-        # Delay force sync until the main UI is visible to avoid startup flashes.
-        self._apply_auto_deposit_sync(force_now=False)
+        # Обновляем депозит сразу при запуске для немедленного отображения актуального баланса
+        self._apply_auto_deposit_sync(force_now=True)
 
         # Сохраняем настройки при закрытии приложения любым способом
         app = QApplication.instance()
@@ -589,6 +589,7 @@ class RiskVolumeApp(QMainWindow):
             "metascalp_cells_count": 5,
             "scalp_multipliers": [100, 50, 25, 10],
             "scalp_manual_multipliers": [100, 50, 25, 10, 0],
+            "scalp_min_order": 6,
             "cells_reversed": False,
             "pos_current_vol": "0",
             "pos_risk": "1",
@@ -3232,8 +3233,16 @@ class RiskVolumeApp(QMainWindow):
                 QRegularExpressionValidator(QRegularExpression(rx))
             )
 
+            # Используем текущее значение из поля, если оно не пусто
+            # Иначе - из settings, иначе - дефолтное 6
             try:
-                current_val = float(self.inp_min_order.text().replace(",", ".") or 0)
+                text_val = self.inp_min_order.text().strip()
+                if text_val:
+                    # Если текст не пуст, используем его
+                    current_val = float(text_val.replace(",", "."))
+                else:
+                    # Если текст пуст, используем значение из settings
+                    current_val = float(self.settings.get("scalp_min_order", 6))
             except Exception:
                 current_val = float(self.settings.get("scalp_min_order", 6))
 
@@ -6378,8 +6387,9 @@ class RiskVolumeApp(QMainWindow):
 
         # Сохраняем мин.ордер
         try:
-            min_order = float(self.inp_min_order.text().replace(",", ".") or 6)
-        except:
+            min_order_text = self.inp_min_order.text().replace(",", ".")
+            min_order = float(min_order_text) if min_order_text else 6
+        except Exception:
             min_order = 6
 
         # Если таблица перевернута, сохраняем multipliers в обратном порядке для корректного отображения
