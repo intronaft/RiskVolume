@@ -32,6 +32,19 @@ def _build_sanitized_settings(src_path, dst_path):
         data[key] = []
 
     for key in (
+        'pf_glasses_points',
+        'metascalp_glasses_points',
+        'tiger_glasses_points',
+        'tiger_glasses_open_points',
+        'tiger_glasses_close_points',
+        'surf_glasses_points',
+        'surf_glasses_open_points',
+        'surf_glasses_accept_points',
+        'vataga_glasses_points',
+    ):
+        data[key] = {}
+
+    for key in (
         'tiger_open_point',
         'tiger_close_point',
         'surf_open_point',
