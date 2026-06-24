@@ -31,10 +31,10 @@
 Проект открыт: исходный код доступен всем.
 Любой может изучить архитектуру, проверить логику работы, предложить улучшения и внести вклад в развитие.
 
-🛡️ **Результат сканирования архива из Releases:** https://www.virustotal.com/gui/file/e8a3ae40049764516e507a5296b56d954a67b059720400fbae1389cdb6e55738?nocache=1
+🛡️ **Результат сканирования архива из Releases:** https://www.virustotal.com/gui/file/057948248b04184c0d0075965df502c6b8e406610f33b9f35d391b29f1903a09?nocache=1
 
 ## Загрузка 💾
-Скачивание — через **GitHub Releases**: https://github.com/SetapScalp/RiskVolume/releases/tag/V1.4.0
+Скачивание — через **GitHub Releases**: https://github.com/Setap-Scalp/RiskVolume/releases/tag/V1.4
 - Загрузите RiskVolume.zip
 Распакуйте архив и запустите .exe файл и можно пользоваться ✅
 
