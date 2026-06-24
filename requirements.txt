@@ -6,4 +6,4 @@ qrcode>=8.0
 Pillow>=11.0
 ccxt>=4.4.70
 requests>=2.33.0
-cryptography>=46.0.6
+cryptography>=49.0.0
