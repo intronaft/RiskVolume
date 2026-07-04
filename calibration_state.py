@@ -60,6 +60,17 @@ def reset_terminal_calibration_state(settings, expected_version=None):
     for key in value_keys:
         settings[key] = None
 
+    for key in (
+        "auto_dep_api_key",
+        "auto_dep_api_secret",
+        "auto_dep_api_passphrase",
+        "auto_dep_credentials",
+        "auto_dep_connected",
+        "auto_dep_connected_exchange",
+        "auto_dep_connected_market",
+    ):
+        settings[key] = [] if key == "auto_dep_credentials" else ""
+
     settings["pf_glasses_count"] = 1
     settings["pf_active_glass"] = 1
     settings["pf_selected_glasses"] = [1]
