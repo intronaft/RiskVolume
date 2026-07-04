@@ -86,6 +86,7 @@ from logic import calculate_risk_data, calculate_position_adjustment, get_info_h
 from translations import TRANS
 from calculator_tab import init_calculator_tab
 from secure_credentials import protect_secret, unprotect_secret
+from calibration_state import reset_terminal_calibration_state, CALIBRATION_RESET_MARKER_KEY
 
 try:
     myappid = "setap.scalp.v1"
@@ -653,7 +654,10 @@ class RiskVolumeApp(QMainWindow):
             if key not in self.settings:
                 self.settings[key] = val
 
-        pf_settings_changed = self._normalize_pf_multi_glass_settings()
+        # Fresh builds should clear all old calibration points so the first launch
+        # requires a single capture per terminal for all related modes.
+        reset_changed = reset_terminal_calibration_state(self.settings)
+        pf_settings_changed = self._normalize_pf_multi_glass_settings() or reset_changed
 
         # Migration: preserve existing calculator calibration points as Profit Forge points.
         if (
@@ -2121,6 +2125,17 @@ class RiskVolumeApp(QMainWindow):
         points = self.settings.get(key, [])
         return self._normalize_calc_points(points)
 
+    def _get_shared_active_calibration_points(self):
+        if self._uses_shared_preset_controls():
+            return self._get_pf_points_for_glass(self._get_pf_active_glass())
+        return self._get_active_calc_points()
+
+    def _set_shared_active_calibration_points(self, points):
+        if self._uses_shared_preset_controls():
+            self._set_pf_points_for_glass(self._get_pf_active_glass(), points)
+            return
+        self._set_active_calc_points(points)
+
     def _get_standard_volume_precision(self):
         try:
             precision = int(self.settings.get("prec_dep", 2))
@@ -2489,7 +2504,7 @@ class RiskVolumeApp(QMainWindow):
         self.settings[key] = list(points)
 
     def _reset_active_calc_calibration(self):
-        self._set_active_calc_points([])
+        self._set_shared_active_calibration_points([])
         if self._is_menu_terminal():
             self._set_menu_point_for_glass(None, is_close=False)
             if self._menu_terminal_requires_final_point():
@@ -5355,14 +5370,16 @@ class RiskVolumeApp(QMainWindow):
             self.update_calibration_status()
             return
 
-        points = self._get_active_calc_points()
+        points = self._get_shared_active_calibration_points()
 
         # Если уже есть достаточно - не захватываем дальше
         if len(points) >= cells_count:
+            self.calc_calibration_active = False
+            self.update_calibration_status()
             return
 
         points.append([x, y])
-        self._set_active_calc_points(points)
+        self._set_shared_active_calibration_points(points)
         self.save_settings()
 
         if len(points) >= cells_count:
