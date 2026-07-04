@@ -65,6 +65,11 @@ def _build_sanitized_settings(src_path, dst_path):
     ):
         data[key] = None
 
+    data['pf_glasses_count'] = 1
+    data['pf_active_glass'] = 1
+    data['pf_selected_glasses'] = [1]
+    data['pf_show_preview_frames'] = False
+
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     with open(dst_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False)
