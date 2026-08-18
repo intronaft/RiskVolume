@@ -25,16 +25,15 @@ logging.debug("Application startup begin")
 import json
 import time
 import hmac
-import queue
 import hashlib
 import subprocess
 import requests
 import pyperclip
 import threading
 import importlib
-import multiprocessing
 from urllib.parse import urlencode
 import config
+from auto_deposit import build_ccxt_balance_request_variants
 from PyQt6.QtWidgets import (
     QApplication,
     QStyleFactory,
@@ -124,19 +123,8 @@ pyautogui = None
 
 
 def _configure_windows_multiprocessing_executable():
-    """Use pythonw for spawned child processes to avoid transient console windows."""
-    if sys.platform != "win32":
-        return
-    if getattr(sys, "frozen", False):
-        # Frozen executable already runs without console; keep default behavior.
-        return
-    try:
-        exe_dir = os.path.dirname(sys.executable or "")
-        pythonw_path = os.path.join(exe_dir, "pythonw.exe")
-        if os.path.exists(pythonw_path):
-            multiprocessing.set_executable(pythonw_path)
-    except Exception:
-        pass
+    """Disabled: multiprocessing setup on Windows causes phantom windows at startup."""
+    pass
 
 
 def _hide_console_window_on_windows():
@@ -195,78 +183,82 @@ def _relaunch_with_pythonw_if_needed():
         return
 
 
-def _fetch_balance_with_ccxt_process(payload, result_queue):
+def _fetch_balance_with_ccxt(payload):
     try:
         ccxt = importlib.import_module("ccxt")
-
-        exchange_id = str(payload.get("exchange_id", "") or "").strip().lower()
-        api_key = str(payload.get("api_key", "") or "").strip()
-        api_secret = str(payload.get("api_secret", "") or "").strip()
-        market_type = str(payload.get("market_type", "spot") or "spot").strip().lower()
-        asset = str(payload.get("asset", "USDT") or "USDT").strip().upper()
-        passphrase = str(payload.get("passphrase", "") or "").strip()
-
-        ex_class = getattr(ccxt, exchange_id, None)
-        if ex_class is None:
-            result_queue.put({"ok": False, "error": f"Unsupported exchange: {exchange_id}"})
-            return
-
-        options = {}
-        if market_type == "futures":
-            default_map = {
-                "bybit": "swap",
-                "okx": "swap",
-                "gate": "swap",
-                "bitget": "swap",
-                "mexc": "swap",
-                "kucoin": "swap",
-            }
-            options["defaultType"] = default_map.get(exchange_id, "swap")
-
-        params = {
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-            "timeout": 4000,
-            "options": options,
-        }
-        if passphrase:
-            params["password"] = passphrase
-
-        exchange = ex_class(params)
-        try:
-            balance = exchange.fetch_balance()
-        finally:
-            try:
-                exchange.close()
-            except Exception:
-                pass
-
-        total = balance.get("total", {}) if isinstance(balance, dict) else {}
-        free = balance.get("free", {}) if isinstance(balance, dict) else {}
-        used = balance.get("used", {}) if isinstance(balance, dict) else {}
-
-        free_val = float(free.get(asset, 0.0) or 0.0)
-        used_val = float(used.get(asset, 0.0) or 0.0)
-
-        # For futures, show only free (available) balance, not total/wallet balance.
-        if market_type == "futures":
-            if asset in free and free[asset] is not None:
-                result_queue.put({"ok": True, "balance": free_val})
-                return
-            if asset in total and total[asset] is not None:
-                result_queue.put({"ok": True, "balance": float(total[asset])})
-                return
-            result_queue.put({"ok": True, "balance": free_val})
-            return
-
-        if asset in total and total[asset] is not None:
-            result_queue.put({"ok": True, "balance": float(total[asset])})
-            return
-
-        result_queue.put({"ok": True, "balance": free_val + used_val})
     except Exception as exc:
-        result_queue.put({"ok": False, "error": str(exc)})
+        raise RuntimeError(f"Failed to import ccxt: {exc}")
+
+    exchange_id = str(payload.get("exchange_id", "") or "").strip().lower()
+    api_key = str(payload.get("api_key", "") or "").strip()
+    api_secret = str(payload.get("api_secret", "") or "").strip()
+    market_type = str(payload.get("market_type", "spot") or "spot").strip().lower()
+    asset = str(payload.get("asset", "USDT") or "USDT").strip().upper()
+    passphrase = str(payload.get("passphrase", "") or "").strip()
+
+    ex_class = getattr(ccxt, exchange_id, None)
+    if ex_class is None:
+        raise RuntimeError(f"Unsupported exchange: {exchange_id}")
+
+    variants = build_ccxt_balance_request_variants(
+        exchange_id=exchange_id,
+        market_type=market_type,
+        api_key=api_key,
+        api_secret=api_secret,
+        asset=asset,
+        passphrase=passphrase,
+    )
+
+    last_error = None
+    for variant in variants:
+        try:
+            auth = dict(variant.get("auth", {}))
+            params = {
+                "apiKey": auth.get("apiKey", api_key),
+                "secret": auth.get("secret", api_secret),
+                "enableRateLimit": True,
+                "timeout": 3000,
+            }
+            params.update({k: v for k, v in auth.items() if k not in {"apiKey", "secret"}})
+            if passphrase:
+                params["password"] = passphrase
+
+            exchange = ex_class(params)
+            try:
+                balance = exchange.fetch_balance()
+            finally:
+                try:
+                    exchange.close()
+                except Exception:
+                    pass
+
+            total = balance.get("total", {}) if isinstance(balance, dict) else {}
+            free = balance.get("free", {}) if isinstance(balance, dict) else {}
+            used = balance.get("used", {}) if isinstance(balance, dict) else {}
+
+            free_val = float(free.get(asset, 0.0) or 0.0)
+            used_val = float(used.get(asset, 0.0) or 0.0)
+
+            if market_type == "futures":
+                if asset in free and free[asset] is not None:
+                    return free_val
+                if asset in total and total[asset] is not None:
+                    return float(total[asset])
+                return free_val
+
+            if asset in total and total[asset] is not None:
+                return float(total[asset])
+
+            return free_val + used_val
+        except Exception as exc:
+            last_error = str(exc)
+
+    raise RuntimeError(last_error or "Balance fetch failed")
+
+
+def _fetch_balance_with_ccxt_process(payload, result_queue):
+    """Legacy: no longer used. Thread-based approach is in _fetch_non_binance_balance_light."""
+    pass
 
 
 def _force_consistent_qt_theme(app: QApplication):
@@ -454,11 +446,13 @@ class RiskVolumeApp(QMainWindow):
         self._hotkey_keepalive_timer = QTimer(self)
         self._hotkey_keepalive_timer.timeout.connect(self._keepalive_hotkeys)
         self._hotkey_keepalive_timer.start(30 * 1000)  # каждые 30 секунд
-        # Регистрируем горячие клавиши сразу при старте
-        try:
-            self.rebind_hotkeys()
-        except Exception:
-            pass
+        
+        # ОТКЛЮЧЕНО: Инициализация keyboard модуля создаёт фоновые окна на Windows при старте.
+        # Клавиши будут инициализированы лениво при первом использовании вместо этого.
+        # self._hotkey_init_timer = QTimer(self)
+        # self._hotkey_init_timer.setSingleShot(True)
+        # self._hotkey_init_timer.timeout.connect(self._delayed_init_keyboard_module)
+        # self._hotkey_init_timer.start(3500)
         logging.debug("RiskVolumeApp.__init__ COMPLETE")
 
         # Периодическая синхронизация депозита через API (если включено)
@@ -466,8 +460,11 @@ class RiskVolumeApp(QMainWindow):
         self._auto_dep_timer = QTimer(self)
         self._auto_dep_timer.setSingleShot(False)
         self._auto_dep_timer.timeout.connect(self._sync_deposit_from_exchange)
-        # Обновляем депозит сразу при запуске для немедленного отображения актуального баланса
-        self._apply_auto_deposit_sync(force_now=True)
+        # ОТКЛЮЧЕНО при старте: импорт ccxt создаёт фоновые окна на Windows.
+        # Баланс будет обновлён через периодический таймер (45 сек) после загрузки окна,
+        # или когда пользователь откроет настройки и изменит параметры автодепозита.
+        # Удаляем принудительную синхронизацию при старте.
+        # self._apply_auto_deposit_sync(force_now=True)
 
         # Сохраняем настройки при закрытии приложения любым способом
         app = QApplication.instance()
@@ -1245,34 +1242,27 @@ class RiskVolumeApp(QMainWindow):
             "passphrase": passphrase,
         }
 
-        ctx = multiprocessing.get_context("spawn")
-        result_queue = ctx.Queue(maxsize=1)
-        worker = ctx.Process(
-            target=_fetch_balance_with_ccxt_process,
-            args=(payload, result_queue),
-            daemon=True,
-        )
+        result = {}
+        exception_holder = []
+
+        def _worker():
+            try:
+                result["balance"] = _fetch_balance_with_ccxt(payload)
+            except Exception as exc:
+                exception_holder.append(exc)
+
+        worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
-        worker.join(timeout=7.0)
+        worker.join(timeout=8.0)
 
         if worker.is_alive():
-            worker.terminate()
-            worker.join(timeout=1.0)
-            raise RuntimeError("Balance request timed out")
+            raise RuntimeError("Balance request timed out after 8 seconds")
 
-        try:
-            result = result_queue.get_nowait()
-        except queue.Empty:
-            raise RuntimeError("Empty balance response")
-        finally:
-            try:
-                result_queue.close()
-                result_queue.join_thread()
-            except Exception:
-                pass
+        if exception_holder:
+            raise exception_holder[0]
 
-        if not result.get("ok"):
-            raise RuntimeError(str(result.get("error", "Balance fetch failed")))
+        if "balance" not in result:
+            raise RuntimeError("No balance returned")
 
         return float(result.get("balance", 0.0) or 0.0)
 
@@ -4849,6 +4839,38 @@ class RiskVolumeApp(QMainWindow):
         self._hotkey_ids[key_name] = hotkey_id
         self.settings[key_name] = fallback
 
+    def _delayed_rebind_hotkeys(self):
+        """Отложенная регистрация горячих клавиш для избежания фоновых окон при старте."""
+        try:
+            self.rebind_hotkeys()
+        except Exception:
+            pass
+
+    def _delayed_init_keyboard_module(self):
+        """Инициализирует keyboard модуль после полной загрузки UI и фокуса главного окна."""
+        try:
+            # Убедиться что главное окно в фокусе и видимо
+            if not self.isVisible():
+                self.show()
+            self.activateWindow()
+            self.raise_()
+            
+            # Запустим в фоновом потоке чтобы не блокировать UI
+            def _init_keyboard_in_thread():
+                try:
+                    # Небольшая дополнительная задержка в потоке
+                    import time
+                    time.sleep(0.5)
+                    if self._ensure_keyboard_module():
+                        self.rebind_hotkeys()
+                except Exception:
+                    pass
+
+            init_thread = threading.Thread(target=_init_keyboard_in_thread, daemon=True)
+            init_thread.start()
+        except Exception:
+            pass
+
     def rebind_hotkeys(self):
         if not self._ensure_keyboard_module():
             return
@@ -5058,10 +5080,11 @@ class RiskVolumeApp(QMainWindow):
                     pass
 
                 menu_kind = self._menu_terminal_kind() or "tiger"
-                open_menu_settle_delay = 0.03
-                post_paste_settle_delay = 0.012
-                between_cells_delay = 0.025
-                close_menu_delay = 0.03
+                is_tiger_trade = menu_kind == "tiger"
+                open_menu_settle_delay = 0.06 if is_tiger_trade else 0.03
+                post_paste_settle_delay = 0.025 if is_tiger_trade else 0.012
+                between_cells_delay = 0.05 if is_tiger_trade else 0.025
+                close_menu_delay = 0.06 if is_tiger_trade else 0.03
 
                 requires_final_point = self._menu_terminal_requires_final_point()
                 for batch_index, (glass, points) in enumerate(target_batches):
@@ -5092,24 +5115,24 @@ class RiskVolumeApp(QMainWindow):
 
                     pyautogui.moveTo(t_open[0], t_open[1], duration=0.015)
                     pyautogui.click()
-                    time.sleep(0.012)
+                    time.sleep(0.02 if is_tiger_trade else 0.012)
                     pyautogui.doubleClick(interval=0.03)
                     time.sleep(open_menu_settle_delay)
 
                     for transfer_index, (point_index, vol_to_send) in enumerate(transfers):
                         pyperclip.copy(vol_to_send)
-                        time.sleep(0.01)
+                        time.sleep(0.015 if is_tiger_trade else 0.01)
                         pyautogui.moveTo(
                             points[point_index][0], points[point_index][1], duration=0.015
                         )
                         pyautogui.click()
-                        time.sleep(0.012)
+                        time.sleep(0.02 if is_tiger_trade else 0.012)
                         pyautogui.doubleClick(interval=0.03)
-                        time.sleep(0.012)
+                        time.sleep(0.02 if is_tiger_trade else 0.012)
                         keyboard.press_and_release("ctrl+a")
-                        time.sleep(0.01)
+                        time.sleep(0.015 if is_tiger_trade else 0.01)
                         keyboard.press_and_release("backspace")
-                        time.sleep(0.01)
+                        time.sleep(0.015 if is_tiger_trade else 0.01)
                         keyboard.press_and_release("ctrl+v")
                         time.sleep(post_paste_settle_delay)
                         if transfer_index < len(transfers) - 1:
@@ -5125,7 +5148,7 @@ class RiskVolumeApp(QMainWindow):
                         time.sleep(close_menu_delay)
 
                     if batch_index < len(target_batches) - 1:
-                        time.sleep(0.04)
+                        time.sleep(0.06 if is_tiger_trade else 0.04)
             else:
                 try:
                     pyautogui.MINIMUM_SLEEP = 0.0005
@@ -6894,12 +6917,8 @@ class RiskVolumeApp(QMainWindow):
 
 if __name__ == "__main__":
     logging.debug("=== Application startup ===")
-    multiprocessing.freeze_support()
-    logging.debug("freeze_support done")
     _hide_console_window_on_windows()
     logging.debug("console hidden")
-    _configure_windows_multiprocessing_executable()
-    logging.debug("multiprocessing configured")
     existing_qt_rules = os.environ.get("QT_LOGGING_RULES", "")
     dpi_noise_rule = "qt.qpa.window.warning=false"
     if dpi_noise_rule not in existing_qt_rules:
