@@ -1073,6 +1073,8 @@ class SettingsDialog(QDialog):
         return self._auto_dep_exchange_values[self.cb_auto_dep_exchange.currentIndex()]
 
     def _current_auto_dep_market(self):
+        if self._current_auto_dep_exchange() == "bybit":
+            return "futures"
         return "spot" if self.cb_auto_dep_market.currentIndex() == 1 else "futures"
 
     def _is_auto_dep_connected_for_current_selection(self):
@@ -1323,9 +1325,9 @@ class SettingsDialog(QDialog):
         self._auto_dep_reconnect_for_selection()
 
     def _update_auto_dep_market_visibility(self):
-        # Show market selector for all supported exchanges
-        self.lbl_auto_dep_market.setVisible(True)
-        self.cb_auto_dep_market.setVisible(True)
+        is_bybit = self._current_auto_dep_exchange() == "bybit"
+        self.lbl_auto_dep_market.setVisible(not is_bybit)
+        self.cb_auto_dep_market.setVisible(not is_bybit)
 
     def _on_auto_dep_market_changed(self, *_):
         self._auto_dep_reconnect_for_selection()
