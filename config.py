@@ -41,7 +41,7 @@ APP_VERSION = "1.2"
 WINDOW_SIZE = (360, 500)
 
 # --- ИНФОРМАЦИЯ ОБ АВТОРЕ ---
-AUTHOR_NAME = "SetapScalp"
+AUTHOR_NAME = "intronaft"
 YOUTUBE_URL = "https://www.youtube.com/@SetapScalp"
 
 # --- КРИПТОАДРЕСА ДЛЯ ДОНАТОВ ---
