@@ -257,7 +257,7 @@ class AboutDialog(QDialog):
                 pass
 
         self.close()
-        QDesktopServices.openUrl(QUrl("https://setapscalp.taplink.ws/"))
+        QDesktopServices.openUrl(QUrl("https://linktr.ee/intronaft"))
 
     def mousePressEvent(self, event):
         """Начало перетаскивания окна"""
