@@ -35,7 +35,7 @@
 https://www.virustotal.com/gui/file/2b7180c646ec6486b59c9f55cda9187da0524cce14c624172c64eae7f8068883?nocache=1
 
 ## Загрузка 💾
-Скачивание — через **GitHub Releases**: https://github.com/Setap-Scalp/RiskVolume/releases/tag/V1.4
+Скачивание — через **GitHub Releases**: https://github.com/intronaft/RiskVolume/releases/tag/V1.5
 - Загрузите RiskVolume.zip
 Распакуйте архив и запустите .exe файл и можно пользоваться ✅
 
