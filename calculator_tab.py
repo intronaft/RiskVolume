@@ -405,14 +405,6 @@ def init_calculator_tab(app):
     app.btn_reverse_cells.clicked.connect(app.toggle_cells_order)
     cells_header.addWidget(app.btn_reverse_cells)
 
-    app.btn_move_adjust_to_cell = QPushButton("↪")
-    app.btn_move_adjust_to_cell.setFixedSize(34, 25)
-    app.btn_move_adjust_to_cell.setToolTip(t["calc_move_adjust"])
-    app.btn_move_adjust_to_cell.setStyleSheet("color: #8E8E8E;")
-    app.btn_move_adjust_to_cell.clicked.connect(app.apply_position_adjustment_to_cell)
-    app.btn_move_adjust_to_cell.setEnabled(False)
-    cells_header.addWidget(app.btn_move_adjust_to_cell)
-
     app.btn_toggle_all_cells = QPushButton(t["calc_toggle_all_btn"])
     app.btn_toggle_all_cells.setFixedSize(34, 25)
     app.btn_toggle_all_cells.setToolTip(t["calc_toggle_all"])

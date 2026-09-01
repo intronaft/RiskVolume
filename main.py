@@ -3156,8 +3156,6 @@ class RiskVolumeApp(QMainWindow):
             self.lbl_pos_adjust.setText(t["calc_recommendation"])
         if hasattr(self, "btn_reverse_cells"):
             self.btn_reverse_cells.setToolTip(t["calc_reverse_cells"])
-        if hasattr(self, "btn_move_adjust_to_cell"):
-            self.btn_move_adjust_to_cell.setToolTip(t["calc_move_adjust"])
         if hasattr(self, "btn_toggle_all_cells"):
             self.btn_toggle_all_cells.setText(t["calc_toggle_all_btn"])
             self.btn_toggle_all_cells.setToolTip(t["calc_toggle_all"])
@@ -3558,8 +3556,6 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#555", base_pt=7, with_padding=True)
                 )
             self._set_position_action_chip(None)
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "lbl_pos_warning"):
                 self.lbl_pos_warning.setText("")
                 self.lbl_pos_warning.setVisible(False)
@@ -3620,8 +3616,6 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
             self.settings["pos_current_vol"] = self.inp_pos_vol.text()
             self.settings["pos_risk"] = self.inp_pos_risk.text()
             self.settings["pos_stop"] = self.inp_pos_stop.text()
@@ -3649,8 +3643,6 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_stop_delta"):
@@ -3673,8 +3665,6 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_stop_delta"):
@@ -3699,8 +3689,6 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_warning"):
@@ -3736,8 +3724,6 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_warning"):
@@ -3795,8 +3781,6 @@ class RiskVolumeApp(QMainWindow):
             self._set_position_action_chip("add", delta_text)
             self.lbl_pos_adjust.setText(target_with_lev_text)
             self.lbl_pos_adjust.setStyleSheet(self._position_hint_style())
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(True)
         elif action == "reduce":
             self.pos_adjust_delta = float(delta_abs)
             self.pos_adjust_action = "reduce"
@@ -3815,8 +3799,6 @@ class RiskVolumeApp(QMainWindow):
             self._set_position_action_chip("reduce", delta_text)
             self.lbl_pos_adjust.setText(target_with_lev_text)
             self.lbl_pos_adjust.setStyleSheet(self._position_hint_style())
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(True)
         else:
             self.pos_adjust_delta = 0.0
             self.pos_adjust_action = None
@@ -3834,9 +3816,6 @@ class RiskVolumeApp(QMainWindow):
             self._set_position_action_chip(None)
             self.lbl_pos_adjust.setText(target_with_lev_text)
             self.lbl_pos_adjust.setStyleSheet(self._position_hint_style())
-            if hasattr(self, "btn_move_adjust_to_cell"):
-                self.btn_move_adjust_to_cell.setEnabled(False)
-
         self.settings["pos_current_vol"] = self.inp_pos_vol.text()
         self.settings["pos_risk"] = self.inp_pos_risk.text()
         self.settings["pos_stop"] = self.inp_pos_stop.text()
@@ -3856,6 +3835,65 @@ class RiskVolumeApp(QMainWindow):
             btn.setChecked(idx == cell_num)
         self.settings["pos_target_cell"] = cell_num
         self.save_settings()
+
+    def apply_position_adjustment_to_cell(self):
+        """Compatibility wrapper for legacy callers.
+
+        The current UI applies the in-position adjustment automatically and does not
+        expose a dedicated transfer button. This helper keeps old code/tests working
+        while preserving the live auto-update behavior used by the app.
+        """
+        if not hasattr(self, "cells_table"):
+            return
+
+        try:
+            if not bool(self.settings.get("pos_mode_enabled", False)):
+                return
+        except RuntimeError:
+            return
+
+        try:
+            selected = set(getattr(self, "selected_transfer_rows", set()))
+        except RuntimeError:
+            selected = set()
+
+        try:
+            target_row = getattr(self, "position_target_row_active", None)
+            if not selected and target_row is not None:
+                selected = {int(target_row)}
+        except RuntimeError:
+            target_row = None
+
+        if not selected:
+            selected = {0}
+
+        try:
+            self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
+        except Exception:
+            pass
+
+        try:
+            row_count = getattr(self.cells_table, "rowCount", lambda: 5)()
+            for i in range(row_count):
+                item = self.cells_table.item(i, 2)
+                if not item:
+                    continue
+                if i in selected:
+                    item.setText("100")
+                else:
+                    item.setText("")
+        finally:
+            try:
+                self.cells_table.itemChanged.connect(self.on_table_item_changed)
+            except Exception:
+                pass
+
+        try:
+            self._capture_current_manual_distribution(pos_mode=True)
+            self.update_cell_volumes()
+            self.save_cell_settings()
+        except RuntimeError:
+            pass
 
     def _set_position_target_row_mask(self, target_row=None, lock_controls=True):
         if not hasattr(self, "cells_table") or not hasattr(self, "lbl_cells_count"):
@@ -4058,7 +4096,6 @@ class RiskVolumeApp(QMainWindow):
             "lbl_pos_risk_title",
             "lbl_pos_stop_title",
             "lbl_pos_stop_now_title",
-            "btn_move_adjust_to_cell",
             "lbl_pos_vol_hint",
             "lbl_pos_risk_cash",
             "lbl_pos_action_chip",
@@ -4070,12 +4107,7 @@ class RiskVolumeApp(QMainWindow):
             if widget:
                 pos_controls.append(widget)
 
-        if enabled and not is_startup:
-            # Сохраняем выбранный пользователем тип распределения без принудительной смены.
-            # Automatically apply position adjustment
-            if hasattr(self, "apply_position_adjustment_to_cell"):
-                self.apply_position_adjustment_to_cell()
-        elif not enabled and not is_startup:
+        if not enabled and not is_startup:
             # User disabled position mode.
             self.table_volume_override = 0.0
             self.settings["pos_table_volume_override"] = 0.0
@@ -4326,89 +4358,6 @@ class RiskVolumeApp(QMainWindow):
 
         self._set_window_size_with_extra_height(grow_only=grow_only, smooth=smooth)
 
-    def apply_position_adjustment_to_cell(self):
-        if not bool(self.settings.get("pos_mode_enabled", False)):
-            self._update_status_text()
-            return
-
-        amount = float(getattr(self, "pos_adjust_delta", 0.0) or 0.0)
-        if amount <= 0:
-            self._update_status_text()
-            return
-
-        active_rows = self._get_active_rows_for_table()
-        if not active_rows:
-            self._update_status_text()
-            return
-
-        self.table_volume_override = float(amount)
-        self.settings["pos_table_volume_override"] = float(amount)
-
-        preset_index = (
-            int(self.cb_distribution.currentIndex())
-            if hasattr(self, "cb_distribution")
-            else 2
-        )
-
-        try:
-            self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
-        except Exception:
-            pass
-
-        if preset_index == 2:
-            # Position-mode transfer must not reuse the normal manual snapshot.
-            # The target row for the adjustment is the selected row and must receive
-            # the full 100% allocation while the rest stay empty. This is a separate
-            # state from the normal manual distribution values.
-            target_row = active_rows[0] if active_rows else None
-            for i in range(5):
-                item = self.cells_table.item(i, 2)
-                if not item:
-                    continue
-                if i not in active_rows:
-                    item.setText("")
-                elif i == target_row:
-                    item.setText("100")
-                else:
-                    item.setText("")
-
-            pos_key = self._manual_distribution_setting_key(pos_mode=True)
-            self.settings[pos_key] = [
-                100 if i == target_row else 0 for i in range(5)
-            ]
-            self.settings["scalp_manual_multipliers"] = list(
-                self.settings.get("scalp_manual_multipliers", [0] * 5)
-            )
-        else:
-            for i in range(5):
-                item = self.cells_table.item(i, 2)
-                if item:
-                    item.setText("0")
-
-            count = len(active_rows)
-            values = []
-            if preset_index == 0:
-                base = int(100 / count)
-                remainder = 100 % count
-                values = [base + (1 if idx < remainder else 0) for idx in range(count)]
-            else:
-                dec = [100, 75, 50, 25, 10]
-                values = dec[:count]
-                if len(values) < count:
-                    values.extend([10] * (count - len(values)))
-
-            for idx, row in enumerate(active_rows):
-                item = self.cells_table.item(row, 2)
-                if item:
-                    item.setText(str(values[idx]))
-
-        self.cells_table.itemChanged.connect(self.on_table_item_changed)
-
-        self._update_selected_rows_visuals()
-        self.update_cell_volumes()
-        self.save_cell_settings()
-
-        self._update_status_text()
 
     def format_with_abbreviations(self, value, precision):
         """Форматирует число с одним сокращением"""
@@ -4742,7 +4691,6 @@ class RiskVolumeApp(QMainWindow):
 
         for name in (
             "btn_reverse_cells",
-            "btn_move_adjust_to_cell",
             "btn_toggle_all_cells",
             "btn_cells_minus",
             "btn_cells_plus",
