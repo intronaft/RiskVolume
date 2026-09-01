@@ -538,6 +538,37 @@ class RiskVolumeApp(QMainWindow):
             pix.save(path, "PNG")
         self._posmode_checkmark_path_css = path.replace("\\", "/")
 
+    @staticmethod
+    def _normalize_fee_settings(settings):
+        if not isinstance(settings, dict):
+            settings = {}
+
+        def parse_float(value, fallback):
+            try:
+                return max(0.0, float(value))
+            except Exception:
+                return float(fallback)
+
+        default_total = 0.1
+        try:
+            default_total = max(0.0, float(settings.get("fee_percent", 0.1) or 0.1))
+        except Exception:
+            default_total = 0.1
+
+        fee_total = default_total
+        fee_taker = parse_float(settings.get("fee_taker"), fee_total / 2.0)
+        fee_maker = parse_float(settings.get("fee_maker"), fee_total / 2.0)
+
+        if settings.get("fee_taker") is None and settings.get("fee_maker") is None:
+            fee_taker = fee_total / 2.0
+            fee_maker = fee_total / 2.0
+
+        normalized = dict(settings)
+        normalized["fee_taker"] = fee_taker
+        normalized["fee_maker"] = fee_maker
+        normalized["fee_percent"] = fee_taker + fee_maker
+        return normalized
+
     def load_settings(self):
         default = {
             "deposit": 1000.0,
@@ -589,6 +620,7 @@ class RiskVolumeApp(QMainWindow):
             "scalp_manual_multipliers": [100, 50, 25, 10, 0],
             "scalp_min_order": 6,
             "cells_reversed": False,
+            "cells_reversed_pos": False,
             "pos_current_vol": "0",
             "pos_risk": "1",
             "pos_stop": "0",
@@ -650,6 +682,8 @@ class RiskVolumeApp(QMainWindow):
         for key, val in default.items():
             if key not in self.settings:
                 self.settings[key] = val
+
+        self.settings = self._normalize_fee_settings(self.settings)
 
         # Fresh builds should clear all old calibration points so the first launch
         # requires a single capture per terminal for all related modes.
@@ -4927,7 +4961,12 @@ class RiskVolumeApp(QMainWindow):
 
         t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
         active_rows = sorted(self._get_active_rows_for_table())
-        is_reversed = self.settings.get("cells_reversed", False)
+        is_reversed = bool(
+            self.settings.get(
+                self._cells_reversed_setting_key(),
+                False,
+            )
+        )
         if is_reversed:
             active_rows = list(reversed(active_rows))
 
@@ -5625,47 +5664,45 @@ class RiskVolumeApp(QMainWindow):
                     item.setFlags(default_flags)
 
     def toggle_cells_order(self):
-        """Переворачивает порядок ячеек в таблице"""
-        cells_count = 5
+        """Переворачивает порядок ячеек и % от общего в активном режиме."""
+        if not hasattr(self, "cells_table"):
+            return
 
-        # Собираем текущие проценты для всех 5 строк
+        pos_mode = bool(self.settings.get("pos_mode_enabled", False))
+        reverse_key = "cells_reversed_pos" if pos_mode else "cells_reversed"
+
+        cells_count = 5
         percentages = []
         for i in range(cells_count):
             item = self.cells_table.item(i, 2)
             if item and item.text():
                 try:
                     percentages.append(int(item.text()))
-                except:
+                except Exception:
                     percentages.append(0)
             else:
                 percentages.append(0)
 
-        # Переворачиваем порядок
-        percentages.reverse()
+        reversed_percentages = list(reversed(percentages))
 
-        # Отключаем сигнал
         try:
             self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
-        except:
+        except Exception:
             pass
 
-        # Применяем перевернутые значения
         for i in range(cells_count):
             item = self.cells_table.item(i, 2)
             if item:
-                item.setText(str(percentages[i]))
+                item.setText(str(reversed_percentages[i]))
 
-        # Включаем сигнал обратно
-        self.cells_table.itemChanged.connect(self.on_table_item_changed)
+        try:
+            self.cells_table.itemChanged.connect(self.on_table_item_changed)
+        except Exception:
+            pass
 
-        # Переключаем флаг
-        self.settings["cells_reversed"] = not self.settings.get("cells_reversed", False)
-
-        # Обновляем подписи ячеек
+        self.settings[reverse_key] = not bool(self.settings.get(reverse_key, False))
         self.update_cells_labels()
         self._update_selected_rows_visuals()
-
-        # Обновляем расчеты и сохраняем
         self.update_cell_volumes()
         self.save_cell_settings()
 
@@ -5727,9 +5764,6 @@ class RiskVolumeApp(QMainWindow):
         # Загружаем сохраненные значения процентов только для режима "Вручную"
         if preset_index == 2:
             saved_multipliers = self._get_manual_distribution_values()
-            is_reversed = self.settings.get("cells_reversed", False)
-            if is_reversed:
-                saved_multipliers = list(reversed(saved_multipliers))
 
             # Use actual active rows (which may include target row beyond cells_count)
             active_rows = self._get_active_rows_for_table()
@@ -5761,7 +5795,8 @@ class RiskVolumeApp(QMainWindow):
             return
 
         cells_count = int(self.lbl_cells_count.text())
-        is_reversed = self.settings.get("cells_reversed", False)
+        pos_mode = bool(self.settings.get("pos_mode_enabled", False))
+        is_reversed = bool(self.settings.get("cells_reversed_pos" if pos_mode else "cells_reversed", False))
 
         active_labels = list(range(1, cells_count + 1))
         if is_reversed:
@@ -6117,7 +6152,8 @@ class RiskVolumeApp(QMainWindow):
     def _apply_preset_values(self, preset_index):
         """Применяет значения выбранного пресета"""
         active_rows = self._get_active_rows_for_table()
-        if self.settings.get("cells_reversed", False):
+        reverse_key = self._cells_reversed_setting_key()
+        if bool(self.settings.get(reverse_key, False)):
             active_rows = list(reversed(active_rows))
         cells_count = len(active_rows)
 
@@ -6225,8 +6261,8 @@ class RiskVolumeApp(QMainWindow):
             return
 
         saved = self._get_manual_distribution_values()
-        if self.settings.get("cells_reversed", False):
-            saved = list(reversed(saved))
+        # Keep stored manual values in their actual row order. The reverse button
+        # should be the only place that flips the order visually.
 
         # Guard against stale zero snapshots from older runs. If the current manual
         # key is empty/zero but the generic manual key has real values, prefer the
@@ -6235,8 +6271,6 @@ class RiskVolumeApp(QMainWindow):
             generic_saved = self.settings.get("scalp_manual_multipliers", saved)
             if isinstance(generic_saved, list) and any(int(v) > 0 for v in generic_saved):
                 saved = list(generic_saved)
-                if self.settings.get("cells_reversed", False):
-                    saved = list(reversed(saved))
 
         active_rows = set(self._get_active_rows_for_table())
         for i in range(5):
@@ -6293,9 +6327,10 @@ class RiskVolumeApp(QMainWindow):
             if any(int(v) > 0 for v in persisted):
                 saved = list(persisted)
 
-        if self.settings.get("cells_reversed", False):
-            saved = list(reversed(saved))
-
+        # Preserve the underlying row-based percentage snapshot. The reverse button
+        # changes only the visible display order, not the stored per-row values.
+        # If we reverse here again, toggling an individual cell flips the values a
+        # second time even when the reverse command was not pressed.
         has_real_manual_value = any(int(v) > 0 for v in saved)
         try:
             self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
@@ -6335,6 +6370,11 @@ class RiskVolumeApp(QMainWindow):
             if bool(pos_mode_enabled)
             else "scalp_distribution_type"
         )
+
+    def _cells_reversed_setting_key(self, pos_mode_enabled=None):
+        if pos_mode_enabled is None:
+            pos_mode_enabled = bool(self.settings.get("pos_mode_enabled", False))
+        return "cells_reversed_pos" if bool(pos_mode_enabled) else "cells_reversed"
 
     def _manual_distribution_setting_key(self, pos_mode_enabled=None, pos_mode=None):
         if pos_mode is not None:
@@ -6564,8 +6604,6 @@ class RiskVolumeApp(QMainWindow):
         saved_manual = self._get_manual_distribution_values(
             pos_mode=bool(self.settings.get("pos_mode_enabled", False))
         )
-        if self.settings.get("cells_reversed", False):
-            saved_manual = list(reversed(saved_manual))
 
         for i in range(5):
             item = self.cells_table.item(i, 2)
@@ -6588,10 +6626,6 @@ class RiskVolumeApp(QMainWindow):
             min_order = float(min_order_text) if min_order_text else 6
         except Exception:
             min_order = 6
-
-        is_reversed = self.settings.get("cells_reversed", False)
-        if is_reversed:
-            multipliers.reverse()
 
         self._set_terminal_cells_count(cells_count)
 
@@ -6617,7 +6651,10 @@ class RiskVolumeApp(QMainWindow):
                 self.settings["scalp_manual_multipliers"] = list(multipliers)
 
         self.settings["scalp_min_order"] = min_order
-        self.settings["cells_reversed"] = is_reversed
+        self.settings["cells_reversed"] = bool(self.settings.get("cells_reversed", False))
+        self.settings["cells_reversed_pos"] = bool(
+            self.settings.get("cells_reversed_pos", False)
+        )
         self.save_settings()
 
     def is_cursor_over_window(self):
