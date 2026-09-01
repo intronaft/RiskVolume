@@ -1,6 +1,7 @@
 import math
 import unittest
 
+import main
 from logic import calculate_position_adjustment
 
 
@@ -156,6 +157,17 @@ class PositionAdjustmentTests(unittest.TestCase):
 
         self.assertTrue(math.isclose(long_like["target_volume"], short_like["target_volume"], rel_tol=1e-9))
         self.assertEqual(long_like["action"], short_like["action"])
+
+    def test_fee_settings_preserve_custom_maker_value(self):
+        normalized = main.RiskVolumeApp._normalize_fee_settings({
+            "fee_percent": 0.07,
+            "fee_taker": 0.05,
+            "fee_maker": 0.02,
+        })
+
+        self.assertEqual(normalized["fee_taker"], 0.05)
+        self.assertEqual(normalized["fee_maker"], 0.02)
+        self.assertEqual(normalized["fee_percent"], 0.07)
 
 
 if __name__ == "__main__":
