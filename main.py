@@ -4094,9 +4094,14 @@ class RiskVolumeApp(QMainWindow):
                 self._restore_cells_count(enabled)
             except Exception:
                 pass
-            self._restore_distribution_state(enabled)
+            self._startup_restore_suppressed = bool(is_startup)
+            try:
+                self._restore_distribution_state(enabled)
+            finally:
+                self._startup_restore_suppressed = False
 
-        self.save_settings()
+        if not is_startup:
+            self.save_settings()
 
         # Затемняем/включаем верхнюю часть в зависимости от позиции режима
         self._dim_top_controls(enabled)
@@ -6015,6 +6020,41 @@ class RiskVolumeApp(QMainWindow):
                     editor.setSelection(0, len(editor.text()))
 
 
+    def _persist_manual_percent_snapshot(self, values=None, pos_mode=None):
+        """Immediately writes the current manual percentages to settings.
+
+        Blank cells during row toggles or partial edits must preserve the last
+        non-zero manual value instead of being rewritten to zero, otherwise a
+        single clear operation wipes the entire manual distribution snapshot.
+        """
+        if pos_mode is None:
+            pos_mode = bool(self.settings.get("pos_mode_enabled", False))
+
+        previous_values = self._get_manual_distribution_values(pos_mode=pos_mode)
+
+        if values is None:
+            values = []
+            for i in range(5):
+                cell = self.cells_table.item(i, 2) if hasattr(self, "cells_table") else None
+                text = (cell.text() if cell else "") or ""
+                text = str(text).strip()
+                if not text:
+                    values.append(int(previous_values[i]) if i < len(previous_values) else 0)
+                    continue
+                try:
+                    values.append(max(0, min(100, int(text))))
+                except Exception:
+                    values.append(int(previous_values[i]) if i < len(previous_values) else 0)
+
+        values = [max(0, min(100, int(v))) for v in values[:5]] + [0] * max(0, 5 - len(values[:5]))
+        manual_key = self._manual_distribution_setting_key(pos_mode)
+        self.settings["scalp_manual_multipliers"] = list(values)
+        self.settings[manual_key] = list(values)
+        self.settings["scalp_multipliers"] = list(values)
+        self.settings[self._distribution_type_setting_key(pos_mode)] = int(
+            self.cb_distribution.currentIndex() if hasattr(self, "cb_distribution") else 2
+        )
+
     def on_table_item_changed(self, item):
         """Вызывается когда изменяется ячейка таблицы"""
         if item.column() == 2:  # Только для колонки с процентами
@@ -6027,6 +6067,7 @@ class RiskVolumeApp(QMainWindow):
             text = item.text().strip()
             if text == "":
                 self._capture_current_manual_distribution()
+                self._persist_manual_percent_snapshot()
                 self.update_cell_volumes()
                 self.save_cell_settings()
                 self._schedule_smooth_content_resize(force=True)
@@ -6037,6 +6078,7 @@ class RiskVolumeApp(QMainWindow):
             except ValueError:
                 item.setText("")
                 self._capture_current_manual_distribution()
+                self._persist_manual_percent_snapshot()
                 self.update_cell_volumes()
                 self.save_cell_settings()
                 self._schedule_smooth_content_resize(force=True)
@@ -6048,6 +6090,7 @@ class RiskVolumeApp(QMainWindow):
                 item.setText(normalized)
 
             self._capture_current_manual_distribution()
+            self._persist_manual_percent_snapshot()
             self.update_cell_volumes()
             self.save_cell_settings()
             self._schedule_smooth_content_resize(force=True)
@@ -6174,17 +6217,27 @@ class RiskVolumeApp(QMainWindow):
         if not hasattr(self, "cells_table"):
             return
 
+        previous_values = self._get_manual_distribution_values(
+            pos_mode=bool(self.settings.get("pos_mode_enabled", False))
+            if pos_mode is None
+            else pos_mode
+        )
+
         manual_values = []
         for i in range(5):
             item = self.cells_table.item(i, 2)
             text = (item.text() if item else "") or ""
             text = str(text).strip()
-            manual_values.append(int(text) if text.isdigit() else 0)
+            if not text or not text.isdigit():
+                manual_values.append(int(previous_values[i]) if i < len(previous_values) else 0)
+                continue
+            manual_values.append(max(0, min(100, int(text))))
 
         if pos_mode is None:
             pos_mode = bool(self.settings.get("pos_mode_enabled", False))
         key = self._manual_distribution_setting_key(pos_mode)
         self.settings[key] = manual_values
+        self.settings["scalp_manual_multipliers"] = list(manual_values)
 
     def _capture_manual_distribution_snapshot_from_table(self, pos_mode=None):
         """Сохраняет текущие проценты, но не затирает старые ручные значения пустыми ячейками."""
@@ -6216,6 +6269,16 @@ class RiskVolumeApp(QMainWindow):
         saved = self._get_manual_distribution_values()
         if self.settings.get("cells_reversed", False):
             saved = list(reversed(saved))
+
+        # Guard against stale zero snapshots from older runs. If the current manual
+        # key is empty/zero but the generic manual key has real values, prefer the
+        # real values when restoring the table.
+        if not any(int(v) > 0 for v in saved):
+            generic_saved = self.settings.get("scalp_manual_multipliers", saved)
+            if isinstance(generic_saved, list) and any(int(v) > 0 for v in generic_saved):
+                saved = list(generic_saved)
+                if self.settings.get("cells_reversed", False):
+                    saved = list(reversed(saved))
 
         active_rows = set(self._get_active_rows_for_table())
         for i in range(5):
@@ -6356,7 +6419,8 @@ class RiskVolumeApp(QMainWindow):
         self.cells_table.itemChanged.connect(self.on_table_item_changed)
         self._update_selected_rows_visuals()
         self.update_cell_volumes()
-        self.save_cell_settings()
+        if not bool(getattr(self, "_startup_restore_suppressed", False)):
+            self.save_cell_settings()
 
     def _selected_rows_setting_key(self, pos_mode_enabled=None):
         if pos_mode_enabled is None:
@@ -6558,9 +6622,22 @@ class RiskVolumeApp(QMainWindow):
             multipliers.reverse()
 
         self._set_terminal_cells_count(cells_count)
-        self.settings["scalp_multipliers"] = multipliers
+        self.settings["scalp_multipliers"] = list(multipliers)
+
+        # Manual mode values must be persisted in both the generic key and the
+        # mode-specific key, otherwise the UI may keep the last selected type but
+        # lose the actual percentage values after restart.
+        manual_key = self._manual_distribution_setting_key(
+            bool(self.settings.get("pos_mode_enabled", False))
+        )
+        self.settings["scalp_manual_multipliers"] = list(multipliers)
+        self.settings[manual_key] = list(multipliers)
+        self.settings["scalp_distribution_type"] = int(
+            self.cb_distribution.currentIndex() if hasattr(self, "cb_distribution") else 2
+        )
+
         if is_manual_mode:
-            self.settings[self._manual_distribution_setting_key(bool(self.settings.get("pos_mode_enabled", False)))] = list(multipliers)
+            self.settings[manual_key] = list(multipliers)
         self.settings["scalp_min_order"] = min_order
         self.settings["cells_reversed"] = is_reversed
         self.save_settings()
