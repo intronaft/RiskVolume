@@ -112,6 +112,147 @@ class ManualDistributionPersistenceTests(unittest.TestCase):
         except RuntimeError as exc:
             self.fail(f"startup restore unexpectedly persisted settings: {exc}")
 
+    def test_manual_row_toggle_preserves_previous_percentage_when_reenabled(self):
+        app = RiskVolumeApp.__new__(RiskVolumeApp)
+        app.settings = {
+            "scalp_manual_multipliers": [50, 0, 0, 0, 0],
+            "scalp_manual_multipliers_pos": [50, 0, 0, 0, 0],
+            "cells_reversed": False,
+            "pos_mode_enabled": False,
+        }
+
+        class Cell:
+            def __init__(self, text=""):
+                self._text = text
+            def text(self):
+                return self._text
+            def setText(self, value):
+                self._text = str(value)
+
+        rows = [Cell(""), Cell(""), Cell(""), Cell(""), Cell("")]
+        app.cells_table = type("Table", (), {"item": lambda self, row, col: rows[row] if col == 2 else None})()
+        app.cb_distribution = type("Cb", (), {"currentIndex": lambda self: 2})()
+        app._apply_manual_active_row_flags = lambda: None
+        app.on_table_item_changed = lambda *args, **kwargs: None
+
+        app._restore_manual_distribution_for_active_rows({0})
+
+        self.assertEqual(rows[0].text(), "50")
+
+    def test_position_mode_keeps_special_100_fallback_only_in_pos_mode(self):
+        app = RiskVolumeApp.__new__(RiskVolumeApp)
+        app.settings = {
+            "scalp_manual_multipliers": [0, 0, 0, 0, 0],
+            "scalp_manual_multipliers_pos": [0, 0, 0, 0, 0],
+            "cells_reversed": False,
+            "pos_mode_enabled": True,
+        }
+        app.pos_adjust_delta = 40.0
+
+        class Cell:
+            def __init__(self, text=""):
+                self._text = text
+            def text(self):
+                return self._text
+            def setText(self, value):
+                self._text = str(value)
+
+        rows = [Cell(""), Cell(""), Cell(""), Cell(""), Cell("")]
+
+        class FakeSignal:
+            def connect(self, *args, **kwargs):
+                pass
+            def disconnect(self, *args, **kwargs):
+                pass
+
+        class FakeTable:
+            def __init__(self):
+                self.itemChanged = FakeSignal()
+            def item(self, row, col):
+                return rows[row] if col == 2 else None
+
+        app.cells_table = FakeTable()
+        app.cb_distribution = type("Cb", (), {"currentIndex": lambda self: 2})()
+        app._apply_manual_active_row_flags = lambda: None
+        app.on_table_item_changed = lambda *args, **kwargs: None
+        app._get_active_rows_for_table = lambda: [0]
+        app._update_selected_rows_visuals = lambda: None
+        app.update_cell_volumes = lambda: None
+        app.save_cell_settings = lambda: None
+        app._update_status_text = lambda: None
+
+        app.apply_position_adjustment_to_cell()
+
+        self.assertEqual(rows[0].text(), "100")
+
+    def test_distribution_type_and_manual_values_are_stored_per_mode(self):
+        app = RiskVolumeApp.__new__(RiskVolumeApp)
+        app.settings = {
+            "scalp_manual_multipliers": [100, 50, 25, 10, 0],
+            "scalp_manual_multipliers_pos": [75, 25, 0, 0, 0],
+            "scalp_distribution_type": 0,
+            "scalp_distribution_type_pos": 1,
+            "cells_reversed": False,
+            "pos_mode_enabled": True,
+        }
+        app.position_target_row_active = None
+        app.cb_distribution = type("Cb", (), {"currentIndex": lambda self: 2})()
+        app.inp_min_order = type("Inp", (), {"text": lambda self: "6"})()
+        app.lbl_cells_count = type("Lbl", (), {"text": lambda self: "5"})()
+        app._set_terminal_cells_count = lambda value: None
+        app.save_settings = lambda: None
+
+        class Cell:
+            def __init__(self, text=""):
+                self._text = text
+            def text(self):
+                return self._text
+            def setText(self, value):
+                self._text = str(value)
+
+        rows = [Cell("10"), Cell("20"), Cell(""), Cell(""), Cell("")]
+        app.cells_table = type("Table", (), {"item": lambda self, row, col: rows[row] if col == 2 else None})()
+
+        app.save_cell_settings()
+
+        self.assertEqual(app.settings["scalp_distribution_type_pos"], 2)
+        self.assertEqual(app.settings["scalp_distribution_type"], 0)
+        self.assertEqual(app.settings["scalp_manual_multipliers_pos"], [10, 20, 0, 0, 0])
+        self.assertEqual(app.settings["scalp_manual_multipliers"], [100, 50, 25, 10, 0])
+
+    def test_manual_snapshot_is_preserved_when_switching_from_equal_to_manual(self):
+        app = RiskVolumeApp.__new__(RiskVolumeApp)
+        app.settings = {
+            "scalp_manual_multipliers": [100, 60, 33, 15, 5],
+            "scalp_manual_multipliers_pos": [0, 0, 0, 0, 0],
+            "scalp_distribution_type": 0,
+            "scalp_distribution_type_pos": 0,
+            "cells_reversed": False,
+            "pos_mode_enabled": False,
+        }
+        app.position_target_row_active = None
+        app.cb_distribution = type("Cb", (), {"currentIndex": lambda self: 0})()
+        app.inp_min_order = type("Inp", (), {"text": lambda self: "6"})()
+        app.lbl_cells_count = type("Lbl", (), {"text": lambda self: "5"})()
+        app._set_terminal_cells_count = lambda value: None
+        app.save_settings = lambda: None
+
+        class Cell:
+            def __init__(self, text=""):
+                self._text = text
+            def text(self):
+                return self._text
+            def setText(self, value):
+                self._text = str(value)
+
+        rows = [Cell("20"), Cell("20"), Cell("20"), Cell("20"), Cell("20")]
+        app.cells_table = type("Table", (), {"item": lambda self, row, col: rows[row] if col == 2 else None})()
+
+        app.save_cell_settings()
+
+        self.assertEqual(app.settings["scalp_manual_multipliers"], [100, 60, 33, 15, 5])
+        self.assertEqual(app.settings["scalp_distribution_type"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
