@@ -460,11 +460,8 @@ class RiskVolumeApp(QMainWindow):
         self._auto_dep_timer = QTimer(self)
         self._auto_dep_timer.setSingleShot(False)
         self._auto_dep_timer.timeout.connect(self._sync_deposit_from_exchange)
-        # ОТКЛЮЧЕНО при старте: импорт ccxt создаёт фоновые окна на Windows.
-        # Баланс будет обновлён через периодический таймер (45 сек) после загрузки окна,
-        # или когда пользователь откроет настройки и изменит параметры автодепозита.
-        # Удаляем принудительную синхронизацию при старте.
-        # self._apply_auto_deposit_sync(force_now=True)
+        # Запускаем автообновление после полной загрузки окна и настроек.
+        QTimer.singleShot(1000, lambda: self._apply_auto_deposit_sync(force_now=True))
 
         # Сохраняем настройки при закрытии приложения любым способом
         app = QApplication.instance()
@@ -1095,8 +1092,7 @@ class RiskVolumeApp(QMainWindow):
         if hasattr(self, "btn_dep_refresh"):
             self.btn_dep_refresh.setVisible(enabled and connected)
         if enabled and connected:
-            # Интервал до 1 минуты: достаточно оперативно и без лишней нагрузки.
-            self._auto_dep_timer.start(45 * 1000)
+            self._auto_dep_timer.start(30 * 1000)
             self._set_auto_dep_status("loading")
             if force_now:
                 QTimer.singleShot(100, self._sync_deposit_from_exchange)
