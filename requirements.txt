@@ -4,6 +4,6 @@ pyautogui>=0.9.54
 pyperclip>=1.9.0
 qrcode>=8.0
 Pillow>=11.0
-ccxt>=4.4.70
+ccxt>=4.5.76
 requests>=2.33.0
 cryptography>=46.0.6
