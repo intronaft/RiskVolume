@@ -32,10 +32,10 @@
 Любой может изучить архитектуру, проверить логику работы, предложить улучшения и внести вклад в развитие.
 
 🛡️ **Результат сканирования архива из Releases:** 
-https://www.virustotal.com/gui/file/e16f3409396eb0e3e0d5ed6fda2d85059980eb12fb960a069bec930d9c623cbe?nocache=1
+https://www.virustotal.com/gui/file/b4e279bf0c4121779cb2f2715dcab1d1498ec14de802afcbd365070d307ab4fe?nocache=1
 
 ## Загрузка 💾
-Скачивание — через **GitHub Releases**: https://github.com/intronaft/RiskVolume/releases/tag/V1.5.5
+Скачивание — через **GitHub Releases**: https://github.com/intronaft/RiskVolume/releases/tag/V1.5.6
 - Загрузите RiskVolume.zip
 Распакуйте архив и запустите .exe файл и можно пользоваться ✅
 
