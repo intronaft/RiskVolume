@@ -225,7 +225,7 @@ def _fetch_balance_with_ccxt(payload):
 
             exchange = ex_class(params)
             try:
-                balance = exchange.fetch_balance()
+                balance = exchange.fetch_balance(variant.get("params", {}))
             finally:
                 try:
                     exchange.close()
@@ -240,11 +240,14 @@ def _fetch_balance_with_ccxt(payload):
             used_val = float(used.get(asset, 0.0) or 0.0)
 
             if market_type == "futures":
-                if asset in free and free[asset] is not None:
-                    return free_val
+                equity = _extract_cross_margin_equity(
+                    exchange_id, balance, asset
+                )
+                if equity is not None:
+                    return equity
                 if asset in total and total[asset] is not None:
                     return float(total[asset])
-                return free_val
+                return free_val + used_val
 
             if asset in total and total[asset] is not None:
                 return float(total[asset])
@@ -254,6 +257,59 @@ def _fetch_balance_with_ccxt(payload):
             last_error = str(exc)
 
     raise RuntimeError(last_error or "Balance fetch failed")
+
+
+def _extract_cross_margin_equity(exchange_id, balance, asset):
+    """Return cross-margin equity from a CCXT balance response."""
+    if not isinstance(balance, dict):
+        return None
+
+    info = balance.get("info")
+    candidates = {
+        "bybit": ("totalEquity", "totalMarginBalance", "totalWalletBalance"),
+        "binance": ("totalMarginBalance", "totalCrossWalletBalance", "totalWalletBalance"),
+        "okx": ("totalEq", "equity", "cashBal"),
+        "bitget": ("accountEquity", "equity", "marginBalance"),
+        "gate": ("total", "equity", "marginBalance"),
+        "mexc": ("equity", "marginBalance", "walletBalance"),
+        "kucoin": ("accountEquity", "equity", "marginBalance"),
+    }.get(str(exchange_id or "").lower(), ("equity", "totalEquity", "marginBalance"))
+
+    def find_value(value, keys):
+        if isinstance(value, dict):
+            for key in keys:
+                candidate = value.get(key)
+                if candidate not in (None, ""):
+                    try:
+                        parsed = float(candidate)
+                    except (TypeError, ValueError):
+                        continue
+                    if parsed >= 0:
+                        return parsed
+            for nested in value.values():
+                found = find_value(nested, keys)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = find_value(nested, keys)
+                if found is not None:
+                    return found
+        return None
+
+    raw_equity = find_value(info, candidates)
+    if raw_equity is not None:
+        return raw_equity
+
+    total = balance.get("total", {})
+    if isinstance(total, dict) and total.get(asset) not in (None, ""):
+        try:
+            parsed_total = float(total[asset])
+        except (TypeError, ValueError):
+            parsed_total = None
+        if parsed_total is not None and parsed_total >= 0:
+            return parsed_total
+    return None
 
 
 def _fetch_balance_with_ccxt_process(payload, result_queue):
@@ -1317,13 +1373,23 @@ class RiskVolumeApp(QMainWindow):
             response = requests.get(url, headers=headers, timeout=4)
             response.raise_for_status()
             data = response.json()
+            if isinstance(data, dict):
+                value = data.get("totalMarginBalance")
+                if value not in (None, ""):
+                    return float(value or 0.0)
+                wallet = float(data.get("totalCrossWalletBalance", 0.0) or 0.0)
+                unrealized = float(data.get("totalUnrealizedProfit", 0.0) or 0.0)
+                if wallet or unrealized:
+                    return wallet + unrealized
             assets = data.get("assets", []) if isinstance(data, dict) else []
             for row in assets:
                 if str(row.get("asset", "")).upper() == asset:
-                    available = row.get("availableBalance", None)
-                    if available is not None:
-                        return float(available or 0.0)
-                    return float(row.get("walletBalance", 0.0) or 0.0)
+                    margin = row.get("marginBalance")
+                    if margin not in (None, ""):
+                        return float(margin or 0.0)
+                    wallet = float(row.get("crossWalletBalance", 0.0) or 0.0)
+                    unrealized = float(row.get("crossUnPnl", 0.0) or 0.0)
+                    return wallet + unrealized
             return 0.0
 
         if base_url:
