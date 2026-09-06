@@ -176,11 +176,21 @@ def _relaunch_with_pythonw_if_needed():
             env=env,
             close_fds=True,
             creationflags=CREATE_NO_WINDOW,
+            startupinfo=_hidden_subprocess_startupinfo(),
         )
         sys.exit(0)
     except Exception:
         # If relaunch fails, continue normal startup.
         return
+
+
+def _hidden_subprocess_startupinfo():
+    if sys.platform != "win32":
+        return None
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return startupinfo
 
 
 def _fetch_balance_with_ccxt(payload):
@@ -1155,16 +1165,98 @@ class RiskVolumeApp(QMainWindow):
         elif enabled:
             self._auto_dep_timer.stop()
             t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
+            selected_exchange = str(
+                self.settings.get("auto_dep_exchange", "binance") or "binance"
+            ).strip().lower()
+            api_key, api_secret, _ = self._get_auto_dep_credentials(selected_exchange)
+            if not api_key or not api_secret:
+                message = (
+                    f"Для {selected_exchange} не указаны API Key и API Secret."
+                )
+            else:
+                message = t.get(
+                    "auto_dep_connect_required",
+                    "Press Connect and complete API validation first.",
+                )
             self._set_auto_dep_status(
                 "error",
-                t.get(
-                    "auto_dep_connect_required",
-                    "Press Connect in settings before auto-fill can start.",
-                ),
+                message,
             )
         else:
             self._auto_dep_timer.stop()
             self._set_auto_dep_status("off")
+
+    def refresh_quick_deposit_controls(self):
+        if not hasattr(self, "cb_quick_dep_exchange"):
+            return
+        enabled = bool(self.settings.get("auto_dep_enabled", False))
+        available = ["binance", "bybit", "okx", "gate", "bitget", "mexc", "kucoin"]
+        names = {
+            "binance": "Binance",
+            "bybit": "Bybit",
+            "okx": "OKX",
+            "gate": "Gate",
+            "bitget": "Bitget",
+            "mexc": "MEXC",
+            "kucoin": "KuCoin",
+        }
+        current = str(self.settings.get("auto_dep_exchange", "binance")).lower()
+        self.cb_quick_dep_exchange.blockSignals(True)
+        self.cb_quick_dep_exchange.clear()
+        for exchange_id in available:
+            if exchange_id in names:
+                self.cb_quick_dep_exchange.addItem(names[exchange_id], exchange_id)
+        for item_index in range(self.cb_quick_dep_exchange.count()):
+            self.cb_quick_dep_exchange.setItemData(
+                item_index,
+                Qt.AlignmentFlag.AlignCenter,
+                Qt.ItemDataRole.TextAlignmentRole,
+            )
+        index = self.cb_quick_dep_exchange.findData(current)
+        if index >= 0:
+            self.cb_quick_dep_exchange.setCurrentIndex(index)
+        self.cb_quick_dep_exchange.blockSignals(False)
+        self.cb_quick_dep_exchange.setVisible(enabled)
+        if current == "bybit":
+            self.settings["auto_dep_market"] = "futures"
+            self.cb_quick_dep_market.setCurrentIndex(0)
+        self.cb_quick_dep_market.setVisible(enabled and current != "bybit")
+        self.cb_quick_dep_market.blockSignals(True)
+        self.cb_quick_dep_market.setCurrentIndex(
+            1 if str(self.settings.get("auto_dep_market", "futures")).lower() == "spot" else 0
+        )
+        self.cb_quick_dep_market.blockSignals(False)
+
+    def on_quick_deposit_source_changed(self):
+        if not bool(self.settings.get("auto_dep_enabled", False)):
+            return
+        exchange_id = self.cb_quick_dep_exchange.currentData()
+        if not exchange_id:
+            return
+        market = (
+            "futures"
+            if str(exchange_id).lower() == "bybit"
+            else ("spot" if self.cb_quick_dep_market.currentIndex() == 1 else "futures")
+        )
+        self.settings["auto_dep_exchange"] = str(exchange_id)
+        self.settings["auto_dep_market"] = market
+        api_key, api_secret, _ = self._get_auto_dep_credentials(str(exchange_id))
+        if not api_key or not api_secret:
+            self.settings["auto_dep_connected"] = False
+            self.settings["auto_dep_connected_exchange"] = ""
+            self.settings["auto_dep_connected_market"] = ""
+            self.save_settings()
+            self._set_auto_dep_status(
+                "error",
+                f"Для {self.cb_quick_dep_exchange.currentText()} не указаны API Key и API Secret.",
+            )
+            return
+        self.settings["auto_dep_connected"] = bool(api_key and api_secret)
+        self.settings["auto_dep_connected_exchange"] = str(exchange_id)
+        self.settings["auto_dep_connected_market"] = market
+        self.save_settings()
+        self.refresh_quick_deposit_controls()
+        self._apply_auto_deposit_sync(force_now=True)
 
     def _is_auto_dep_connection_ready(self):
         if not bool(self.settings.get("auto_dep_enabled", False)):
@@ -1299,6 +1391,12 @@ class RiskVolumeApp(QMainWindow):
                 market_type,
                 asset,
             )
+        if mapped_exchange_id == "bybit":
+            return self._fetch_bybit_unified_balance(
+                api_key,
+                api_secret,
+                asset,
+            )
 
         return self._fetch_non_binance_balance_light(
             mapped_exchange_id,
@@ -1351,6 +1449,44 @@ class RiskVolumeApp(QMainWindow):
             raise RuntimeError("No balance returned")
 
         return float(result.get("balance", 0.0) or 0.0)
+
+    def _fetch_bybit_unified_balance(self, api_key, api_secret, asset):
+        """Fetch total equity from Bybit Unified cross-margin account."""
+        timestamp = str(int(time.time() * 1000))
+        recv_window = "5000"
+        query = urlencode({"accountType": "UNIFIED", "coin": asset})
+        signature_payload = timestamp + str(api_key) + recv_window + query
+        signature = hmac.new(
+            str(api_secret).encode("utf-8"),
+            signature_payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": str(api_key),
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-SIGN-TYPE": "2",
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+        }
+        response = requests.get(
+            "https://api.bybit.com/v5/account/wallet-balance",
+            params={"accountType": "UNIFIED", "coin": asset},
+            headers=headers,
+            timeout=6,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or int(data.get("retCode", -1)) != 0:
+            message = data.get("retMsg", "Unknown Bybit API error") if isinstance(data, dict) else "Invalid Bybit response"
+            raise RuntimeError(f"Bybit: {message}")
+        result = data.get("result", {})
+        rows = result.get("list", []) if isinstance(result, dict) else []
+        if not rows:
+            raise RuntimeError("Bybit: Unified wallet balance is empty")
+        equity = rows[0].get("totalEquity")
+        if equity in (None, ""):
+            raise RuntimeError("Bybit: totalEquity is missing")
+        return float(equity)
 
     def _fetch_binance_balance_light(self, api_key, api_secret, market_type, asset, base_url=None):
         timestamp_ms = int(time.time() * 1000)

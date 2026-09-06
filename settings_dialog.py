@@ -1508,6 +1508,8 @@ class SettingsDialog(QDialog):
         self.parent_window.rebind_hotkeys()
         if hasattr(self.parent_window, "_apply_auto_deposit_sync"):
             self.parent_window._apply_auto_deposit_sync(force_now=True)
+        if hasattr(self.parent_window, "refresh_quick_deposit_controls"):
+            self.parent_window.refresh_quick_deposit_controls()
         self.parent_window.update_calc()
 
         if preserve_calc_state and self.parent_window:
