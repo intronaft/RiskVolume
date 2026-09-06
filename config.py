@@ -37,7 +37,7 @@ LOGO_PATH = _validate_paths()
 
 # --- 2. НАСТРОЙКИ ПРИЛОЖЕНИЯ ---
 APP_NAME = "TF-Alerter"
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.5.7"
 WINDOW_SIZE = (360, 500)
 
 # --- ИНФОРМАЦИЯ ОБ АВТОРЕ ---

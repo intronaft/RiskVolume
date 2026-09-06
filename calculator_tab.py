@@ -91,6 +91,42 @@ def init_calculator_tab(app):
     dep_row.setSpacing(4)
     dep_row.addWidget(app.inp_dep, 1)
 
+    app.cb_quick_dep_exchange = QComboBox()
+    app.cb_quick_dep_exchange.setObjectName("QuickDepositSelector")
+    app.cb_quick_dep_exchange.setFixedSize(92, 24)
+    app.cb_quick_dep_exchange.setStyleSheet(
+        "QComboBox#QuickDepositSelector { padding: 0px 2px; }"
+        "QComboBox#QuickDepositSelector:focus { border: 1px solid #333; outline: none; }"
+        "QComboBox#QuickDepositSelector::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 0px; border: none; background: transparent; }"
+        "QComboBox#QuickDepositSelector::down-arrow { image: none; width: 0px; height: 0px; border: none; background: transparent; }"
+    )
+    app.cb_quick_dep_exchange.setToolTip("Быстрый выбор биржи для автодепозита")
+    app.cb_quick_dep_exchange.currentIndexChanged.connect(
+        app.on_quick_deposit_source_changed
+    )
+    dep_row.addWidget(app.cb_quick_dep_exchange, 0)
+
+    app.cb_quick_dep_market = QComboBox()
+    app.cb_quick_dep_market.setObjectName("QuickDepositSelector")
+    app.cb_quick_dep_market.setFixedSize(112, 24)
+    app.cb_quick_dep_market.setStyleSheet(
+        "QComboBox#QuickDepositSelector { padding: 0px 2px; }"
+        "QComboBox#QuickDepositSelector:focus { border: 1px solid #333; outline: none; }"
+        "QComboBox#QuickDepositSelector::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 0px; border: none; background: transparent; }"
+        "QComboBox#QuickDepositSelector::down-arrow { image: none; width: 0px; height: 0px; border: none; background: transparent; }"
+    )
+    app.cb_quick_dep_market.addItems(
+        ["Фьюч.(кросс)", t.get("auto_dep_market_spot", "Спот")]
+    )
+    for index in range(app.cb_quick_dep_market.count()):
+        app.cb_quick_dep_market.setItemData(
+            index, Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+        )
+    app.cb_quick_dep_market.currentIndexChanged.connect(
+        app.on_quick_deposit_source_changed
+    )
+    dep_row.addWidget(app.cb_quick_dep_market, 0)
+
     app.btn_dep_refresh = QPushButton(t.get("dep_refresh", "↻"))
     app.btn_dep_refresh.setFixedSize(24, 24)
     app.btn_dep_refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -116,6 +152,7 @@ def init_calculator_tab(app):
     dep_row.addWidget(app.lbl_dep_api_status, 0)
 
     main_layout.addLayout(dep_row)
+    app.refresh_quick_deposit_controls()
 
     app.lbl_hint = QLabel("0")
     app.lbl_hint.setStyleSheet("color: #666; font-size: 8pt;")
