@@ -20,55 +20,22 @@ def _build_sanitized_settings(src_path, dst_path):
     if not isinstance(data, dict):
         data = {}
 
-    # Reset all calibration/capture points for release build.
-    for key in (
-        'points',
-        'calc_points_profit_forge',
-        'calc_points_metascalp',
-        'calc_points_tigertrade',
-        'calc_points_surf',
-        'calc_points_vataga',
-    ):
-        data[key] = []
-
-    for key in (
-        'pf_glasses_points',
-        'metascalp_glasses_points',
-        'tiger_glasses_points',
-        'tiger_glasses_open_points',
-        'tiger_glasses_close_points',
-        'surf_glasses_points',
-        'surf_glasses_open_points',
-        'surf_glasses_accept_points',
-        'vataga_glasses_points',
-    ):
-        data[key] = {}
-
-    for key in (
-        'tiger_open_point',
-        'tiger_close_point',
-        'surf_open_point',
-        'surf_accept_point',
-        'vataga_open_point',
-        'cas_p_gear',
-        'cas_p_left_scrollbar',
-        'cas_p_book',
-        'cas_p_scrollbar',
-        'cas_p_vol1',
-        'cas_p_dist1',
-        'cas_p_vol2',
-        'cas_p_dist2',
-        'cas_p_close_x',
-        'cas_p_btn_add',
-        'cas_p_btn_del',
-        'cas_p_combo_vol',
-    ):
-        data[key] = None
-
-    data['pf_glasses_count'] = 1
-    data['pf_active_glass'] = 1
-    data['pf_selected_glasses'] = [1]
-    data['pf_show_preview_frames'] = False
+    # Preserve calibrated terminal points in the release build.
+    credentials = data.get('auto_dep_credentials', {})
+    if isinstance(credentials, dict):
+        for exchange_id, exchange_credentials in credentials.items():
+            if isinstance(exchange_credentials, dict):
+                exchange_credentials['api_key'] = ''
+                exchange_credentials['api_secret'] = ''
+                exchange_credentials['api_passphrase'] = ''
+    data['auto_dep_credentials'] = credentials
+    data['auto_dep_api_key'] = ''
+    data['auto_dep_api_secret'] = ''
+    data['auto_dep_api_passphrase'] = ''
+    data['auto_dep_enabled'] = False
+    data['auto_dep_connected'] = False
+    data['auto_dep_connected_exchange'] = ''
+    data['auto_dep_connected_market'] = ''
 
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     with open(dst_path, 'w', encoding='utf-8') as f:
