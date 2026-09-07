@@ -11,29 +11,19 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Setup logging to debug file before any heavy operations
-import logging
-_log_file = os.path.join(os.path.dirname(__file__), "rv_debug.log")
-logging.basicConfig(
-    filename=_log_file,
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filemode='w'
-)
-logging.debug("Application startup begin")
-
 import json
 import time
 import hmac
+import queue
 import hashlib
 import subprocess
 import requests
 import pyperclip
 import threading
 import importlib
+import multiprocessing
 from urllib.parse import urlencode
 import config
-from auto_deposit import build_ccxt_balance_request_variants
 from PyQt6.QtWidgets import (
     QApplication,
     QStyleFactory,
@@ -45,10 +35,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QHBoxLayout,
     QPushButton,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QComboBox,
-    QTabWidget,
     QCheckBox,
     QSpinBox,
     QDoubleSpinBox,
@@ -84,10 +74,9 @@ from config import *
 from settings_dialog import SettingsDialog
 from logic import calculate_risk_data, calculate_position_adjustment, get_info_html
 from translations import TRANS
-from calculator_tab import init_calculator_tab
 from cascade_tab import CascadeTab
+from calculator_tab import init_calculator_tab
 from secure_credentials import protect_secret, unprotect_secret
-from calibration_state import reset_terminal_calibration_state, CALIBRATION_RESET_MARKER_KEY
 
 try:
     myappid = "setap.scalp.v1"
@@ -125,8 +114,19 @@ pyautogui = None
 
 
 def _configure_windows_multiprocessing_executable():
-    """Disabled: multiprocessing setup on Windows causes phantom windows at startup."""
-    pass
+    """Use pythonw for spawned child processes to avoid transient console windows."""
+    if sys.platform != "win32":
+        return
+    if getattr(sys, "frozen", False):
+        # Frozen executable already runs without console; keep default behavior.
+        return
+    try:
+        exe_dir = os.path.dirname(sys.executable or "")
+        pythonw_path = os.path.join(exe_dir, "pythonw.exe")
+        if os.path.exists(pythonw_path):
+            multiprocessing.set_executable(pythonw_path)
+    except Exception:
+        pass
 
 
 def _hide_console_window_on_windows():
@@ -178,7 +178,6 @@ def _relaunch_with_pythonw_if_needed():
             env=env,
             close_fds=True,
             creationflags=CREATE_NO_WINDOW,
-            startupinfo=_hidden_subprocess_startupinfo(),
         )
         sys.exit(0)
     except Exception:
@@ -186,147 +185,78 @@ def _relaunch_with_pythonw_if_needed():
         return
 
 
-def _hidden_subprocess_startupinfo():
-    if sys.platform != "win32":
-        return None
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return startupinfo
-
-
-def _fetch_balance_with_ccxt(payload):
+def _fetch_balance_with_ccxt_process(payload, result_queue):
     try:
         ccxt = importlib.import_module("ccxt")
-    except Exception as exc:
-        raise RuntimeError(f"Failed to import ccxt: {exc}")
 
-    exchange_id = str(payload.get("exchange_id", "") or "").strip().lower()
-    api_key = str(payload.get("api_key", "") or "").strip()
-    api_secret = str(payload.get("api_secret", "") or "").strip()
-    market_type = str(payload.get("market_type", "spot") or "spot").strip().lower()
-    asset = str(payload.get("asset", "USDT") or "USDT").strip().upper()
-    passphrase = str(payload.get("passphrase", "") or "").strip()
+        exchange_id = str(payload.get("exchange_id", "") or "").strip().lower()
+        api_key = str(payload.get("api_key", "") or "").strip()
+        api_secret = str(payload.get("api_secret", "") or "").strip()
+        market_type = str(payload.get("market_type", "spot") or "spot").strip().lower()
+        asset = str(payload.get("asset", "USDT") or "USDT").strip().upper()
+        passphrase = str(payload.get("passphrase", "") or "").strip()
 
-    ex_class = getattr(ccxt, exchange_id, None)
-    if ex_class is None:
-        raise RuntimeError(f"Unsupported exchange: {exchange_id}")
+        ex_class = getattr(ccxt, exchange_id, None)
+        if ex_class is None:
+            result_queue.put({"ok": False, "error": f"Unsupported exchange: {exchange_id}"})
+            return
 
-    variants = build_ccxt_balance_request_variants(
-        exchange_id=exchange_id,
-        market_type=market_type,
-        api_key=api_key,
-        api_secret=api_secret,
-        asset=asset,
-        passphrase=passphrase,
-    )
-
-    last_error = None
-    for variant in variants:
-        try:
-            auth = dict(variant.get("auth", {}))
-            params = {
-                "apiKey": auth.get("apiKey", api_key),
-                "secret": auth.get("secret", api_secret),
-                "enableRateLimit": True,
-                "timeout": 3000,
+        options = {}
+        if market_type == "futures":
+            default_map = {
+                "bybit": "swap",
+                "okx": "swap",
+                "gate": "swap",
+                "bitget": "swap",
+                "mexc": "swap",
+                "kucoin": "swap",
             }
-            params.update({k: v for k, v in auth.items() if k not in {"apiKey", "secret"}})
-            if passphrase:
-                params["password"] = passphrase
+            options["defaultType"] = default_map.get(exchange_id, "swap")
 
-            exchange = ex_class(params)
-            try:
-                balance = exchange.fetch_balance(variant.get("params", {}))
-            finally:
-                try:
-                    exchange.close()
-                except Exception:
-                    pass
+        params = {
+            "apiKey": api_key,
+            "secret": api_secret,
+            "enableRateLimit": True,
+            "timeout": 4000,
+            "options": options,
+        }
+        if passphrase:
+            params["password"] = passphrase
 
-            total = balance.get("total", {}) if isinstance(balance, dict) else {}
-            free = balance.get("free", {}) if isinstance(balance, dict) else {}
-            used = balance.get("used", {}) if isinstance(balance, dict) else {}
-
-            free_val = float(free.get(asset, 0.0) or 0.0)
-            used_val = float(used.get(asset, 0.0) or 0.0)
-
-            if market_type == "futures":
-                equity = _extract_cross_margin_equity(
-                    exchange_id, balance, asset
-                )
-                if equity is not None:
-                    return equity
-                if asset in total and total[asset] is not None:
-                    return float(total[asset])
-                return free_val + used_val
-
-            if asset in total and total[asset] is not None:
-                return float(total[asset])
-
-            return free_val + used_val
-        except Exception as exc:
-            last_error = str(exc)
-
-    raise RuntimeError(last_error or "Balance fetch failed")
-
-
-def _extract_cross_margin_equity(exchange_id, balance, asset):
-    """Return cross-margin equity from a CCXT balance response."""
-    if not isinstance(balance, dict):
-        return None
-
-    info = balance.get("info")
-    candidates = {
-        "bybit": ("totalEquity", "totalMarginBalance", "totalWalletBalance"),
-        "binance": ("totalMarginBalance", "totalCrossWalletBalance", "totalWalletBalance"),
-        "okx": ("totalEq", "equity", "cashBal"),
-        "bitget": ("accountEquity", "equity", "marginBalance"),
-        "gate": ("total", "equity", "marginBalance"),
-        "mexc": ("equity", "marginBalance", "walletBalance"),
-        "kucoin": ("accountEquity", "equity", "marginBalance"),
-    }.get(str(exchange_id or "").lower(), ("equity", "totalEquity", "marginBalance"))
-
-    def find_value(value, keys):
-        if isinstance(value, dict):
-            for key in keys:
-                candidate = value.get(key)
-                if candidate not in (None, ""):
-                    try:
-                        parsed = float(candidate)
-                    except (TypeError, ValueError):
-                        continue
-                    if parsed >= 0:
-                        return parsed
-            for nested in value.values():
-                found = find_value(nested, keys)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for nested in value:
-                found = find_value(nested, keys)
-                if found is not None:
-                    return found
-        return None
-
-    raw_equity = find_value(info, candidates)
-    if raw_equity is not None:
-        return raw_equity
-
-    total = balance.get("total", {})
-    if isinstance(total, dict) and total.get(asset) not in (None, ""):
+        exchange = ex_class(params)
         try:
-            parsed_total = float(total[asset])
-        except (TypeError, ValueError):
-            parsed_total = None
-        if parsed_total is not None and parsed_total >= 0:
-            return parsed_total
-    return None
+            balance = exchange.fetch_balance()
+        finally:
+            try:
+                exchange.close()
+            except Exception:
+                pass
 
+        total = balance.get("total", {}) if isinstance(balance, dict) else {}
+        free = balance.get("free", {}) if isinstance(balance, dict) else {}
+        used = balance.get("used", {}) if isinstance(balance, dict) else {}
 
-def _fetch_balance_with_ccxt_process(payload, result_queue):
-    """Legacy: no longer used. Thread-based approach is in _fetch_non_binance_balance_light."""
-    pass
+        free_val = float(free.get(asset, 0.0) or 0.0)
+        used_val = float(used.get(asset, 0.0) or 0.0)
+
+        # For futures, show only free (available) balance, not total/wallet balance.
+        if market_type == "futures":
+            if asset in free and free[asset] is not None:
+                result_queue.put({"ok": True, "balance": free_val})
+                return
+            if asset in total and total[asset] is not None:
+                result_queue.put({"ok": True, "balance": float(total[asset])})
+                return
+            result_queue.put({"ok": True, "balance": free_val})
+            return
+
+        if asset in total and total[asset] is not None:
+            result_queue.put({"ok": True, "balance": float(total[asset])})
+            return
+
+        result_queue.put({"ok": True, "balance": free_val + used_val})
+    except Exception as exc:
+        result_queue.put({"ok": False, "error": str(exc)})
 
 
 def _force_consistent_qt_theme(app: QApplication):
@@ -422,19 +352,14 @@ class GlassPreviewFrame(QWidget):
 
 class RiskVolumeApp(QMainWindow):
     def __init__(self):
-        logging.debug("RiskVolumeApp.__init__ START")
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
         )
-        logging.debug("QMainWindow.__init__ done")
         self._startup_reveal_done = False
         self.base_scale = 100
-        logging.debug("About to load_settings")
         self.load_settings()
-        logging.debug("load_settings done")
         self._create_posmode_checkmark_icon()
-        logging.debug("checkmark icon created")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         try:
             self.setWindowOpacity(0.0)
@@ -497,7 +422,6 @@ class RiskVolumeApp(QMainWindow):
         self._startup_window_suppress_deadline = 0.0
 
         self.init_ui()
-        logging.debug("init_ui completed, setting up timers")
         self._calc_update_timer = QTimer(self)
         self._calc_update_timer.setSingleShot(True)
         self._calc_update_timer.timeout.connect(self.update_calc)
@@ -508,28 +432,19 @@ class RiskVolumeApp(QMainWindow):
         self._smooth_resize_idle_timer.setSingleShot(True)
         self._smooth_resize_idle_timer.timeout.connect(self._apply_idle_smooth_resize)
         self.update_calc()
-        logging.debug("timers setup done")
 
         # Периодически перерегистрируем keyboard-хуки (Windows убивает их при простое/сне)
         self._hotkey_keepalive_timer = QTimer(self)
         self._hotkey_keepalive_timer.timeout.connect(self._keepalive_hotkeys)
-        self._hotkey_keepalive_timer.start(30 * 1000)  # каждые 30 секунд
-        
-        # ОТКЛЮЧЕНО: Инициализация keyboard модуля создаёт фоновые окна на Windows при старте.
-        # Клавиши будут инициализированы лениво при первом использовании вместо этого.
-        # self._hotkey_init_timer = QTimer(self)
-        # self._hotkey_init_timer.setSingleShot(True)
-        # self._hotkey_init_timer.timeout.connect(self._delayed_init_keyboard_module)
-        # self._hotkey_init_timer.start(3500)
-        logging.debug("RiskVolumeApp.__init__ COMPLETE")
+        self._hotkey_keepalive_timer.start(60 * 1000)  # каждые 60 секунд
 
         # Периодическая синхронизация депозита через API (если включено)
         self._auto_dep_sync_busy = False
         self._auto_dep_timer = QTimer(self)
         self._auto_dep_timer.setSingleShot(False)
         self._auto_dep_timer.timeout.connect(self._sync_deposit_from_exchange)
-        # Запускаем автообновление после полной загрузки окна и настроек.
-        QTimer.singleShot(1000, lambda: self._apply_auto_deposit_sync(force_now=True))
+        # Delay force sync until the main UI is visible to avoid startup flashes.
+        self._apply_auto_deposit_sync(force_now=False)
 
         # Сохраняем настройки при закрытии приложения любым способом
         app = QApplication.instance()
@@ -603,37 +518,6 @@ class RiskVolumeApp(QMainWindow):
             pix.save(path, "PNG")
         self._posmode_checkmark_path_css = path.replace("\\", "/")
 
-    @staticmethod
-    def _normalize_fee_settings(settings):
-        if not isinstance(settings, dict):
-            settings = {}
-
-        def parse_float(value, fallback):
-            try:
-                return max(0.0, float(value))
-            except Exception:
-                return float(fallback)
-
-        default_total = 0.1
-        try:
-            default_total = max(0.0, float(settings.get("fee_percent", 0.1) or 0.1))
-        except Exception:
-            default_total = 0.1
-
-        fee_total = default_total
-        fee_taker = parse_float(settings.get("fee_taker"), fee_total / 2.0)
-        fee_maker = parse_float(settings.get("fee_maker"), fee_total / 2.0)
-
-        if settings.get("fee_taker") is None and settings.get("fee_maker") is None:
-            fee_taker = fee_total / 2.0
-            fee_maker = fee_total / 2.0
-
-        normalized = dict(settings)
-        normalized["fee_taker"] = fee_taker
-        normalized["fee_maker"] = fee_maker
-        normalized["fee_percent"] = fee_taker + fee_maker
-        return normalized
-
     def load_settings(self):
         default = {
             "deposit": 1000.0,
@@ -683,9 +567,7 @@ class RiskVolumeApp(QMainWindow):
             "metascalp_cells_count": 5,
             "scalp_multipliers": [100, 50, 25, 10],
             "scalp_manual_multipliers": [100, 50, 25, 10, 0],
-            "scalp_min_order": 6,
             "cells_reversed": False,
-            "cells_reversed_pos": False,
             "pos_current_vol": "0",
             "pos_risk": "1",
             "pos_stop": "0",
@@ -703,7 +585,7 @@ class RiskVolumeApp(QMainWindow):
             "auto_dep_connected_exchange": "",
             "auto_dep_connected_market": "",
             "auto_dep_allow_unverified": False,
-            "auto_apply_terminal": "metascalp",
+            "auto_apply_terminal": "profit_forge",
             "calc_points_profit_forge": [],
             "calc_points_metascalp": [],
             "calc_points_tigertrade": [],
@@ -748,12 +630,7 @@ class RiskVolumeApp(QMainWindow):
             if key not in self.settings:
                 self.settings[key] = val
 
-        self.settings = self._normalize_fee_settings(self.settings)
-
-        # Fresh builds should clear all old calibration points so the first launch
-        # requires a single capture per terminal for all related modes.
-        reset_changed = reset_terminal_calibration_state(self.settings)
-        pf_settings_changed = self._normalize_pf_multi_glass_settings() or reset_changed
+        pf_settings_changed = self._normalize_pf_multi_glass_settings()
 
         # Migration: preserve existing calculator calibration points as Profit Forge points.
         if (
@@ -838,9 +715,6 @@ class RiskVolumeApp(QMainWindow):
             self.save_settings()
 
     def save_settings(self):
-        # Only sync UI state if we're already initialized (tabs exist)
-        if hasattr(self, "tabs"):
-            self._sync_ui_state_to_settings()
         self.settings["auto_dep_api_key"] = ""
         self.settings["auto_dep_api_secret"] = ""
         self.settings["auto_dep_api_passphrase"] = ""
@@ -848,37 +722,6 @@ class RiskVolumeApp(QMainWindow):
             self.settings["auto_dep_credentials"] = {}
         with open(CONFIG_FILE, "w") as f:
             json.dump(self.settings, f)
-
-    def _sync_ui_state_to_settings(self):
-        """Синхронизирует состояние UI виджетов в settings перед сохранением."""
-        if hasattr(self, "chk_pos_mode"):
-            self.settings["pos_mode_enabled"] = bool(self.chk_pos_mode.isChecked())
-
-        if hasattr(self, "chk_pf_show_frames"):
-            self.settings["pf_show_preview_frames"] = bool(
-                self.chk_pf_show_frames.isChecked()
-            )
-
-        if hasattr(self, "cb_pf_calib_glass"):
-            try:
-                active_glass = int(self.cb_pf_calib_glass.currentData() or 1)
-            except Exception:
-                active_glass = 1
-            self.settings["pf_active_glass"] = active_glass
-            self.settings[self._get_shared_active_points_key()] = self._get_pf_points_for_glass(
-                active_glass
-            )
-
-        if hasattr(self, "_pf_target_checkboxes"):
-            selected_glasses = [
-                int(g)
-                for g, cb in self._pf_target_checkboxes.items()
-                if cb and cb.isChecked() and not bool(cb.property("uncalibrated"))
-            ]
-            self.settings["pf_selected_glasses"] = selected_glasses
-
-        if hasattr(self, "chk_range_mode"):
-            self.settings["cas_range_mode"] = bool(self.chk_range_mode.isChecked())
 
     def _secure_encrypt_field(self, value):
         value = str(value or "").strip()
@@ -901,15 +744,7 @@ class RiskVolumeApp(QMainWindow):
         if not isinstance(raw, dict):
             raw = {}
         result = {}
-        for exchange_id in [
-            "binance",
-            "bybit",
-            "okx",
-            "gate",
-            "bitget",
-            "mexc",
-            "kucoin",
-        ]:
+        for exchange_id in ["binance", "bybit", "okx", "gate", "bitget", "mexc", "kucoin"]:
             src = raw.get(exchange_id, {})
             if not isinstance(src, dict):
                 src = {}
@@ -918,7 +753,6 @@ class RiskVolumeApp(QMainWindow):
                 "api_secret": str(src.get("api_secret", "") or ""),
                 "api_passphrase": str(src.get("api_passphrase", "") or ""),
             }
-
         return result
 
     def get_auto_dep_credentials_plain(self):
@@ -1019,8 +853,7 @@ class RiskVolumeApp(QMainWindow):
         if not api_key or not api_secret:
             return False, "Empty API key/secret"
 
-        mapped_exchange_id = self._map_auto_dep_exchange_id(exchange_id)
-        if mapped_exchange_id != "binance":
+        if exchange_id != "binance":
             # For non-Binance exchanges we cannot reliably infer permissions via one unified API.
             return True, ""
 
@@ -1116,14 +949,6 @@ class RiskVolumeApp(QMainWindow):
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
             return
-        # Иногда при открытии диалога настроек Windows кратковременно показывает
-        # консольное окно другого дочернего окна процесса. Попробуем скрыть
-        # все лишние окна прямо перед созданием диалога и ещё раз через короткую
-        # задержку после показа, чтобы погасить возможные импульсные консоли.
-        try:
-            _hide_console_window_on_windows()
-        except Exception:
-            pass
 
         dlg = SettingsDialog(self)
         dlg.setModal(False)
@@ -1131,12 +956,6 @@ class RiskVolumeApp(QMainWindow):
         dlg.finished.connect(self._on_settings_dialog_finished)
         self._settings_dialog = dlg
         dlg.show()
-        try:
-            from PyQt6.QtCore import QTimer
-
-            QTimer.singleShot(50, _hide_console_window_on_windows)
-        except Exception:
-            pass
         dlg.raise_()
         dlg.activateWindow()
 
@@ -1160,105 +979,24 @@ class RiskVolumeApp(QMainWindow):
         if hasattr(self, "btn_dep_refresh"):
             self.btn_dep_refresh.setVisible(enabled and connected)
         if enabled and connected:
-            self._auto_dep_timer.start(30 * 1000)
+            # Интервал до 1 минуты: достаточно оперативно и без лишней нагрузки.
+            self._auto_dep_timer.start(45 * 1000)
             self._set_auto_dep_status("loading")
             if force_now:
                 QTimer.singleShot(100, self._sync_deposit_from_exchange)
         elif enabled:
             self._auto_dep_timer.stop()
             t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
-            selected_exchange = str(
-                self.settings.get("auto_dep_exchange", "binance") or "binance"
-            ).strip().lower()
-            api_key, api_secret, _ = self._get_auto_dep_credentials(selected_exchange)
-            if not api_key or not api_secret:
-                message = (
-                    f"Для {selected_exchange} не указаны API Key и API Secret."
-                )
-            else:
-                message = t.get(
-                    "auto_dep_connect_required",
-                    "Press Connect and complete API validation first.",
-                )
             self._set_auto_dep_status(
                 "error",
-                message,
+                t.get(
+                    "auto_dep_connect_required",
+                    "Press Connect in settings before auto-fill can start.",
+                ),
             )
         else:
             self._auto_dep_timer.stop()
             self._set_auto_dep_status("off")
-
-    def refresh_quick_deposit_controls(self):
-        if not hasattr(self, "cb_quick_dep_exchange"):
-            return
-        enabled = bool(self.settings.get("auto_dep_enabled", False))
-        available = ["binance", "bybit", "okx", "gate", "bitget", "mexc", "kucoin"]
-        names = {
-            "binance": "Binance",
-            "bybit": "Bybit",
-            "okx": "OKX",
-            "gate": "Gate",
-            "bitget": "Bitget",
-            "mexc": "MEXC",
-            "kucoin": "KuCoin",
-        }
-        current = str(self.settings.get("auto_dep_exchange", "binance")).lower()
-        self.cb_quick_dep_exchange.blockSignals(True)
-        self.cb_quick_dep_exchange.clear()
-        for exchange_id in available:
-            if exchange_id in names:
-                self.cb_quick_dep_exchange.addItem(names[exchange_id], exchange_id)
-        for item_index in range(self.cb_quick_dep_exchange.count()):
-            self.cb_quick_dep_exchange.setItemData(
-                item_index,
-                Qt.AlignmentFlag.AlignCenter,
-                Qt.ItemDataRole.TextAlignmentRole,
-            )
-        index = self.cb_quick_dep_exchange.findData(current)
-        if index >= 0:
-            self.cb_quick_dep_exchange.setCurrentIndex(index)
-        self.cb_quick_dep_exchange.blockSignals(False)
-        self.cb_quick_dep_exchange.setVisible(enabled)
-        if current == "bybit":
-            self.settings["auto_dep_market"] = "futures"
-            self.cb_quick_dep_market.setCurrentIndex(0)
-        self.cb_quick_dep_market.setVisible(enabled and current != "bybit")
-        self.cb_quick_dep_market.blockSignals(True)
-        self.cb_quick_dep_market.setCurrentIndex(
-            1 if str(self.settings.get("auto_dep_market", "futures")).lower() == "spot" else 0
-        )
-        self.cb_quick_dep_market.blockSignals(False)
-
-    def on_quick_deposit_source_changed(self):
-        if not bool(self.settings.get("auto_dep_enabled", False)):
-            return
-        exchange_id = self.cb_quick_dep_exchange.currentData()
-        if not exchange_id:
-            return
-        market = (
-            "futures"
-            if str(exchange_id).lower() == "bybit"
-            else ("spot" if self.cb_quick_dep_market.currentIndex() == 1 else "futures")
-        )
-        self.settings["auto_dep_exchange"] = str(exchange_id)
-        self.settings["auto_dep_market"] = market
-        api_key, api_secret, _ = self._get_auto_dep_credentials(str(exchange_id))
-        if not api_key or not api_secret:
-            self.settings["auto_dep_connected"] = False
-            self.settings["auto_dep_connected_exchange"] = ""
-            self.settings["auto_dep_connected_market"] = ""
-            self.save_settings()
-            self._set_auto_dep_status(
-                "error",
-                f"Для {self.cb_quick_dep_exchange.currentText()} не указаны API Key и API Secret.",
-            )
-            return
-        self.settings["auto_dep_connected"] = bool(api_key and api_secret)
-        self.settings["auto_dep_connected_exchange"] = str(exchange_id)
-        self.settings["auto_dep_connected_market"] = market
-        self.save_settings()
-        self.refresh_quick_deposit_controls()
-        self._apply_auto_deposit_sync(force_now=True)
 
     def _is_auto_dep_connection_ready(self):
         if not bool(self.settings.get("auto_dep_enabled", False)):
@@ -1320,12 +1058,9 @@ class RiskVolumeApp(QMainWindow):
             return
         self._sync_deposit_from_exchange(manual=True)
 
-    def _map_auto_dep_exchange_id(self, exchange_id):
-        return str(exchange_id or "").strip().lower()
-
     def _get_auto_dep_credentials(self, exchange_id):
         creds_map = self.get_auto_dep_credentials_plain()
-        ex_creds = creds_map.get(self._map_auto_dep_exchange_id(exchange_id), {})
+        ex_creds = creds_map.get(str(exchange_id or "").strip().lower(), {})
         api_key = str(ex_creds.get("api_key", "") or "").strip()
         api_secret = str(ex_creds.get("api_secret", "") or "").strip()
         api_passphrase = str(ex_creds.get("api_passphrase", "") or "").strip()
@@ -1385,30 +1120,22 @@ class RiskVolumeApp(QMainWindow):
         asset,
         passphrase="",
     ):
-        mapped_exchange_id = self._map_auto_dep_exchange_id(exchange_id)
-        if mapped_exchange_id == "binance":
+        if exchange_id == "binance":
             return self._fetch_binance_balance_light(
                 api_key,
                 api_secret,
                 market_type,
                 asset,
             )
-        if mapped_exchange_id == "bybit":
-            return self._fetch_bybit_unified_balance(
-                api_key,
-                api_secret,
-                asset,
-            )
 
         return self._fetch_non_binance_balance_light(
-            mapped_exchange_id,
+            exchange_id,
             api_key,
             api_secret,
             market_type,
             asset,
             passphrase,
         )
-
 
     def _fetch_non_binance_balance_light(
         self,
@@ -1428,69 +1155,38 @@ class RiskVolumeApp(QMainWindow):
             "passphrase": passphrase,
         }
 
-        result = {}
-        exception_holder = []
-
-        def _worker():
-            try:
-                result["balance"] = _fetch_balance_with_ccxt(payload)
-            except Exception as exc:
-                exception_holder.append(exc)
-
-        worker = threading.Thread(target=_worker, daemon=True)
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue(maxsize=1)
+        worker = ctx.Process(
+            target=_fetch_balance_with_ccxt_process,
+            args=(payload, result_queue),
+            daemon=True,
+        )
         worker.start()
-        worker.join(timeout=8.0)
+        worker.join(timeout=7.0)
 
         if worker.is_alive():
-            raise RuntimeError("Balance request timed out after 8 seconds")
+            worker.terminate()
+            worker.join(timeout=1.0)
+            raise RuntimeError("Balance request timed out")
 
-        if exception_holder:
-            raise exception_holder[0]
+        try:
+            result = result_queue.get_nowait()
+        except queue.Empty:
+            raise RuntimeError("Empty balance response")
+        finally:
+            try:
+                result_queue.close()
+                result_queue.join_thread()
+            except Exception:
+                pass
 
-        if "balance" not in result:
-            raise RuntimeError("No balance returned")
+        if not result.get("ok"):
+            raise RuntimeError(str(result.get("error", "Balance fetch failed")))
 
         return float(result.get("balance", 0.0) or 0.0)
 
-    def _fetch_bybit_unified_balance(self, api_key, api_secret, asset):
-        """Fetch total equity from Bybit Unified cross-margin account."""
-        timestamp = str(int(time.time() * 1000))
-        recv_window = "5000"
-        query = urlencode({"accountType": "UNIFIED", "coin": asset})
-        signature_payload = timestamp + str(api_key) + recv_window + query
-        signature = hmac.new(
-            str(api_secret).encode("utf-8"),
-            signature_payload.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": str(api_key),
-            "X-BAPI-SIGN": signature,
-            "X-BAPI-SIGN-TYPE": "2",
-            "X-BAPI-TIMESTAMP": timestamp,
-            "X-BAPI-RECV-WINDOW": recv_window,
-        }
-        response = requests.get(
-            "https://api.bybit.com/v5/account/wallet-balance",
-            params={"accountType": "UNIFIED", "coin": asset},
-            headers=headers,
-            timeout=6,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict) or int(data.get("retCode", -1)) != 0:
-            message = data.get("retMsg", "Unknown Bybit API error") if isinstance(data, dict) else "Invalid Bybit response"
-            raise RuntimeError(f"Bybit: {message}")
-        result = data.get("result", {})
-        rows = result.get("list", []) if isinstance(result, dict) else []
-        if not rows:
-            raise RuntimeError("Bybit: Unified wallet balance is empty")
-        equity = rows[0].get("totalEquity")
-        if equity in (None, ""):
-            raise RuntimeError("Bybit: totalEquity is missing")
-        return float(equity)
-
-    def _fetch_binance_balance_light(self, api_key, api_secret, market_type, asset, base_url=None):
+    def _fetch_binance_balance_light(self, api_key, api_secret, market_type, asset):
         timestamp_ms = int(time.time() * 1000)
         params = {
             "timestamp": timestamp_ms,
@@ -1503,37 +1199,22 @@ class RiskVolumeApp(QMainWindow):
             hashlib.sha256,
         ).hexdigest()
         headers = {"X-MBX-APIKEY": api_key}
+
         if market_type == "futures":
-            if base_url:
-                url = f"{base_url.rstrip('/')}/fapi/v2/account?{query}&signature={signature}"
-            else:
-                url = f"https://fapi.binance.com/fapi/v2/account?{query}&signature={signature}"
+            url = f"https://fapi.binance.com/fapi/v2/account?{query}&signature={signature}"
             response = requests.get(url, headers=headers, timeout=4)
             response.raise_for_status()
             data = response.json()
-            if isinstance(data, dict):
-                value = data.get("totalMarginBalance")
-                if value not in (None, ""):
-                    return float(value or 0.0)
-                wallet = float(data.get("totalCrossWalletBalance", 0.0) or 0.0)
-                unrealized = float(data.get("totalUnrealizedProfit", 0.0) or 0.0)
-                if wallet or unrealized:
-                    return wallet + unrealized
             assets = data.get("assets", []) if isinstance(data, dict) else []
             for row in assets:
                 if str(row.get("asset", "")).upper() == asset:
-                    margin = row.get("marginBalance")
-                    if margin not in (None, ""):
-                        return float(margin or 0.0)
-                    wallet = float(row.get("crossWalletBalance", 0.0) or 0.0)
-                    unrealized = float(row.get("crossUnPnl", 0.0) or 0.0)
-                    return wallet + unrealized
+                    available = row.get("availableBalance", None)
+                    if available is not None:
+                        return float(available or 0.0)
+                    return float(row.get("walletBalance", 0.0) or 0.0)
             return 0.0
 
-        if base_url:
-            url = f"{base_url.rstrip('/')}/api/v3/account?{query}&signature={signature}"
-        else:
-            url = f"https://api.binance.com/api/v3/account?{query}&signature={signature}"
+        url = f"https://api.binance.com/api/v3/account?{query}&signature={signature}"
         response = requests.get(url, headers=headers, timeout=4)
         response.raise_for_status()
         data = response.json()
@@ -1602,11 +1283,9 @@ class RiskVolumeApp(QMainWindow):
         worker.start()
 
     def init_ui(self):
-        logging.debug("init_ui START")
         self.central_widget = QWidget()
         self.central_widget.setObjectName("Root")
         self.setCentralWidget(self.central_widget)
-        logging.debug("central widget set")
 
         self.main_layout = QVBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
@@ -1741,8 +1420,9 @@ class RiskVolumeApp(QMainWindow):
             QTabWidget::pane { border: none; }
             QTabBar::tab { background: #333; color: #888; padding: 5px 10px; border-radius: 4px; margin-right: 2px; }
             QTabBar::tab:selected { background: #38BE1D; color: black; font-weight: bold; }
-            """
+        """
         )
+
         t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
         self.tab_calculator = QWidget()
         self.init_calculator_tab()
@@ -1753,9 +1433,11 @@ class RiskVolumeApp(QMainWindow):
         self.tab_cascade.installEventFilter(self)
         self.tabs.addTab(self.tab_cascade, t.get("tab_casc", "Каскады"))
         self.installEventFilter(self)
+
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
         self.main_layout.addWidget(self.tabs)
+
         self._apply_terminal_mode()
 
         self.apply_min_order_precision()
@@ -1763,7 +1445,6 @@ class RiskVolumeApp(QMainWindow):
         self.apply_styles()
         # Finalize geometry before the first show to avoid startup flicker.
         self.finalize_startup_layout()
-        logging.debug("init_ui DONE - UI fully initialized")
 
     def on_tab_changed(self, index):
         if index == 1 and not self._is_profit_forge_terminal():
@@ -1776,7 +1457,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_profit_forge_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
+            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
             .strip()
             .lower()
             == "profit_forge"
@@ -1784,7 +1465,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_tigertrade_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
+            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
             .strip()
             .lower()
             == "tigertrade"
@@ -1792,7 +1473,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_metascalp_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
+            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
             .strip()
             .lower()
             == "metascalp"
@@ -1800,7 +1481,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_surf_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
+            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
             .strip()
             .lower()
             == "surf"
@@ -1808,7 +1489,7 @@ class RiskVolumeApp(QMainWindow):
 
     def _is_vataga_terminal(self):
         return (
-            str(self.settings.get("auto_apply_terminal", "metascalp") or "metascalp")
+            str(self.settings.get("auto_apply_terminal", "profit_forge") or "profit_forge")
             .strip()
             .lower()
             == "vataga"
@@ -2162,7 +1843,6 @@ class RiskVolumeApp(QMainWindow):
                     glass = int(raw_glass)
                 except Exception:
                     continue
-                if 1 <= glass <= count and glass not in selected:
                     selected.append(glass)
 
         if self.settings.get("pf_selected_glasses") != selected:
@@ -2372,17 +2052,6 @@ class RiskVolumeApp(QMainWindow):
         key = self._get_active_calc_points_key()
         points = self.settings.get(key, [])
         return self._normalize_calc_points(points)
-
-    def _get_shared_active_calibration_points(self):
-        if self._uses_shared_preset_controls():
-            return self._get_pf_points_for_glass(self._get_pf_active_glass())
-        return self._get_active_calc_points()
-
-    def _set_shared_active_calibration_points(self, points):
-        if self._uses_shared_preset_controls():
-            self._set_pf_points_for_glass(self._get_pf_active_glass(), points)
-            return
-        self._set_active_calc_points(points)
 
     def _get_standard_volume_precision(self):
         try:
@@ -2752,7 +2421,7 @@ class RiskVolumeApp(QMainWindow):
         self.settings[key] = list(points)
 
     def _reset_active_calc_calibration(self):
-        self._set_shared_active_calibration_points([])
+        self._set_active_calc_points([])
         if self._is_menu_terminal():
             self._set_menu_point_for_glass(None, is_close=False)
             if self._menu_terminal_requires_final_point():
@@ -2760,6 +2429,18 @@ class RiskVolumeApp(QMainWindow):
         self.save_settings()
 
     def _apply_terminal_mode(self):
+        if not hasattr(self, "tabs"):
+            return
+
+        is_pf = self._is_profit_forge_terminal()
+        if hasattr(self, "tab_cascade"):
+            self.tab_cascade.setEnabled(is_pf)
+
+        self.tabs.setTabEnabled(1, is_pf)
+
+        if not is_pf and self.tabs.currentIndex() == 1:
+            self.tabs.setCurrentIndex(0)
+
         if hasattr(self, "update_calc"):
             self.update_calc()
         if hasattr(self, "update_position_adjustment_info"):
@@ -2768,10 +2449,6 @@ class RiskVolumeApp(QMainWindow):
             self.update_cell_volumes()
         self._sync_cells_count_controls(refresh_table=True)
         self._update_pf_multi_glass_ui()
-        if hasattr(self, "tab_cascade") and hasattr(self, "tabs"):
-            is_profit_forge = self._is_profit_forge_terminal()
-            self.tab_cascade.setEnabled(is_profit_forge)
-            self.tabs.setTabEnabled(1, is_profit_forge)
 
     def _pf_glass_label(self, glass_num):
         t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
@@ -3400,9 +3077,8 @@ class RiskVolumeApp(QMainWindow):
         self._apply_volume_title_style(
             dimmed=bool(self.settings.get("pos_mode_enabled", False))
         )
-        if hasattr(self, "tabs"):
-            self.tabs.setTabText(0, t.get("tab_calc", "Калькулятор"))
-            self.tabs.setTabText(1, t.get("tab_casc", "Каскады"))
+        self.tabs.setTabText(0, t.get("tab_calc", "Калькулятор"))
+        self.tabs.setTabText(1, t.get("tab_casc", "Каскады"))
         self.refresh_calculator_labels()
         if hasattr(self, "tab_cascade"):
             self.tab_cascade.refresh_labels()
@@ -3423,6 +3099,8 @@ class RiskVolumeApp(QMainWindow):
             self.lbl_pos_adjust.setText(t["calc_recommendation"])
         if hasattr(self, "btn_reverse_cells"):
             self.btn_reverse_cells.setToolTip(t["calc_reverse_cells"])
+        if hasattr(self, "btn_move_adjust_to_cell"):
+            self.btn_move_adjust_to_cell.setToolTip(t["calc_move_adjust"])
         if hasattr(self, "btn_toggle_all_cells"):
             self.btn_toggle_all_cells.setText(t["calc_toggle_all_btn"])
             self.btn_toggle_all_cells.setToolTip(t["calc_toggle_all"])
@@ -3503,16 +3181,8 @@ class RiskVolumeApp(QMainWindow):
                 QRegularExpressionValidator(QRegularExpression(rx))
             )
 
-            # Используем текущее значение из поля, если оно не пусто
-            # Иначе - из settings, иначе - дефолтное 6
             try:
-                text_val = self.inp_min_order.text().strip()
-                if text_val:
-                    # Если текст не пуст, используем его
-                    current_val = float(text_val.replace(",", "."))
-                else:
-                    # Если текст пуст, используем значение из settings
-                    current_val = float(self.settings.get("scalp_min_order", 6))
+                current_val = float(self.inp_min_order.text().replace(",", ".") or 0)
             except Exception:
                 current_val = float(self.settings.get("scalp_min_order", 6))
 
@@ -3823,6 +3493,8 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#555", base_pt=7, with_padding=True)
                 )
             self._set_position_action_chip(None)
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "lbl_pos_warning"):
                 self.lbl_pos_warning.setText("")
                 self.lbl_pos_warning.setVisible(False)
@@ -3883,6 +3555,8 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
             self.settings["pos_current_vol"] = self.inp_pos_vol.text()
             self.settings["pos_risk"] = self.inp_pos_risk.text()
             self.settings["pos_stop"] = self.inp_pos_stop.text()
@@ -3910,6 +3584,8 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_stop_delta"):
@@ -3932,6 +3608,8 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_stop_delta"):
@@ -3956,6 +3634,8 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_warning"):
@@ -3991,6 +3671,8 @@ class RiskVolumeApp(QMainWindow):
                     self._position_hint_style("#888", base_pt=8, with_padding=True)
                 )
             self._set_position_action_chip(None)
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
             if hasattr(self, "cells_table"):
                 self.update_cell_volumes()
             if hasattr(self, "lbl_pos_warning"):
@@ -4048,6 +3730,8 @@ class RiskVolumeApp(QMainWindow):
             self._set_position_action_chip("add", delta_text)
             self.lbl_pos_adjust.setText(target_with_lev_text)
             self.lbl_pos_adjust.setStyleSheet(self._position_hint_style())
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(True)
         elif action == "reduce":
             self.pos_adjust_delta = float(delta_abs)
             self.pos_adjust_action = "reduce"
@@ -4066,6 +3750,8 @@ class RiskVolumeApp(QMainWindow):
             self._set_position_action_chip("reduce", delta_text)
             self.lbl_pos_adjust.setText(target_with_lev_text)
             self.lbl_pos_adjust.setStyleSheet(self._position_hint_style())
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(True)
         else:
             self.pos_adjust_delta = 0.0
             self.pos_adjust_action = None
@@ -4083,6 +3769,9 @@ class RiskVolumeApp(QMainWindow):
             self._set_position_action_chip(None)
             self.lbl_pos_adjust.setText(target_with_lev_text)
             self.lbl_pos_adjust.setStyleSheet(self._position_hint_style())
+            if hasattr(self, "btn_move_adjust_to_cell"):
+                self.btn_move_adjust_to_cell.setEnabled(False)
+
         self.settings["pos_current_vol"] = self.inp_pos_vol.text()
         self.settings["pos_risk"] = self.inp_pos_risk.text()
         self.settings["pos_stop"] = self.inp_pos_stop.text()
@@ -4102,65 +3791,6 @@ class RiskVolumeApp(QMainWindow):
             btn.setChecked(idx == cell_num)
         self.settings["pos_target_cell"] = cell_num
         self.save_settings()
-
-    def apply_position_adjustment_to_cell(self):
-        """Compatibility wrapper for legacy callers.
-
-        The current UI applies the in-position adjustment automatically and does not
-        expose a dedicated transfer button. This helper keeps old code/tests working
-        while preserving the live auto-update behavior used by the app.
-        """
-        if not hasattr(self, "cells_table"):
-            return
-
-        try:
-            if not bool(self.settings.get("pos_mode_enabled", False)):
-                return
-        except RuntimeError:
-            return
-
-        try:
-            selected = set(getattr(self, "selected_transfer_rows", set()))
-        except RuntimeError:
-            selected = set()
-
-        try:
-            target_row = getattr(self, "position_target_row_active", None)
-            if not selected and target_row is not None:
-                selected = {int(target_row)}
-        except RuntimeError:
-            target_row = None
-
-        if not selected:
-            selected = {0}
-
-        try:
-            self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
-        except Exception:
-            pass
-
-        try:
-            row_count = getattr(self.cells_table, "rowCount", lambda: 5)()
-            for i in range(row_count):
-                item = self.cells_table.item(i, 2)
-                if not item:
-                    continue
-                if i in selected:
-                    item.setText("100")
-                else:
-                    item.setText("")
-        finally:
-            try:
-                self.cells_table.itemChanged.connect(self.on_table_item_changed)
-            except Exception:
-                pass
-
-        try:
-            self._capture_current_manual_distribution(pos_mode=True)
-            self.update_cell_volumes()
-            self.save_cell_settings()
-        except RuntimeError:
-            pass
 
     def _set_position_target_row_mask(self, target_row=None, lock_controls=True):
         if not hasattr(self, "cells_table") or not hasattr(self, "lbl_cells_count"):
@@ -4363,6 +3993,7 @@ class RiskVolumeApp(QMainWindow):
             "lbl_pos_risk_title",
             "lbl_pos_stop_title",
             "lbl_pos_stop_now_title",
+            "btn_move_adjust_to_cell",
             "lbl_pos_vol_hint",
             "lbl_pos_risk_cash",
             "lbl_pos_action_chip",
@@ -4374,7 +4005,12 @@ class RiskVolumeApp(QMainWindow):
             if widget:
                 pos_controls.append(widget)
 
-        if not enabled and not is_startup:
+        if enabled and not is_startup:
+            # Сохраняем выбранный пользователем тип распределения без принудительной смены.
+            # Automatically apply position adjustment
+            if hasattr(self, "apply_position_adjustment_to_cell"):
+                self.apply_position_adjustment_to_cell()
+        elif not enabled and not is_startup:
             # User disabled position mode.
             self.table_volume_override = 0.0
             self.settings["pos_table_volume_override"] = 0.0
@@ -4393,14 +4029,9 @@ class RiskVolumeApp(QMainWindow):
                 self._restore_cells_count(enabled)
             except Exception:
                 pass
-            self._startup_restore_suppressed = bool(is_startup)
-            try:
-                self._restore_distribution_state(enabled)
-            finally:
-                self._startup_restore_suppressed = False
+            self._restore_distribution_state(enabled)
 
-        if not is_startup:
-            self.save_settings()
+        self.save_settings()
 
         # Затемняем/включаем верхнюю часть в зависимости от позиции режима
         self._dim_top_controls(enabled)
@@ -4625,6 +4256,92 @@ class RiskVolumeApp(QMainWindow):
 
         self._set_window_size_with_extra_height(grow_only=grow_only, smooth=smooth)
 
+    def apply_position_adjustment_to_cell(self):
+        if not bool(self.settings.get("pos_mode_enabled", False)):
+            self._update_status_text()
+            return
+
+        amount = float(getattr(self, "pos_adjust_delta", 0.0) or 0.0)
+        if amount <= 0:
+            self._update_status_text()
+            return
+
+        active_rows = self._get_active_rows_for_table()
+        if not active_rows:
+            self._update_status_text()
+            return
+
+        self.table_volume_override = float(amount)
+        self.settings["pos_table_volume_override"] = float(amount)
+
+        preset_index = (
+            int(self.cb_distribution.currentIndex())
+            if hasattr(self, "cb_distribution")
+            else 2
+        )
+
+        try:
+            self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
+        except Exception:
+            pass
+
+        if preset_index == 2:
+            existing_values = []
+            row_values = {}
+            for row in active_rows:
+                item = self.cells_table.item(row, 2)
+                if item:
+                    text = (item.text() or "").strip()
+                    value = int(text) if text.isdigit() else 0
+                    existing_values.append(value)
+                    row_values[row] = value
+
+            if sum(existing_values) <= 0:
+                for i in range(5):
+                    item = self.cells_table.item(i, 2)
+                    if item:
+                        item.setText("0")
+                first_row = active_rows[0]
+                first_item = self.cells_table.item(first_row, 2)
+                if first_item:
+                    first_item.setText("100")
+            else:
+                for row in active_rows:
+                    if row_values.get(row, 0) > 0:
+                        continue
+                    item = self.cells_table.item(row, 2)
+                    if item:
+                        item.setText("100")
+        else:
+            for i in range(5):
+                item = self.cells_table.item(i, 2)
+                if item:
+                    item.setText("0")
+
+            count = len(active_rows)
+            values = []
+            if preset_index == 0:
+                base = int(100 / count)
+                remainder = 100 % count
+                values = [base + (1 if idx < remainder else 0) for idx in range(count)]
+            else:
+                dec = [100, 75, 50, 25, 10]
+                values = dec[:count]
+                if len(values) < count:
+                    values.extend([10] * (count - len(values)))
+
+            for idx, row in enumerate(active_rows):
+                item = self.cells_table.item(row, 2)
+                if item:
+                    item.setText(str(values[idx]))
+
+        self.cells_table.itemChanged.connect(self.on_table_item_changed)
+
+        self._update_selected_rows_visuals()
+        self.update_cell_volumes()
+        self.save_cell_settings()
+
+        self._update_status_text()
 
     def format_with_abbreviations(self, value, precision):
         """Форматирует число с одним сокращением"""
@@ -4672,7 +4389,7 @@ class RiskVolumeApp(QMainWindow):
             return "0"
 
     def apply_styles(self):
-        logging.debug("apply_styles START")
+
         scale = self.settings.get("scale", self.base_scale)
         scale = max(60, min(120, int(scale)))
         ratio = scale / float(self.base_scale)
@@ -4684,7 +4401,6 @@ class RiskVolumeApp(QMainWindow):
         if compact_60:
             input_font = max(input_font, 9)
         f_small = max(7, int(8.5 * ratio))
-        logging.debug("apply_styles scales calculated")
         # Compress padding growth for large scales to avoid oversized inner gaps.
         pad_ratio = 1.0 + max(0.0, ratio - 1.0) * 0.55
         pad_main = max(1, int(3 * pad_ratio))
@@ -4958,6 +4674,7 @@ class RiskVolumeApp(QMainWindow):
 
         for name in (
             "btn_reverse_cells",
+            "btn_move_adjust_to_cell",
             "btn_toggle_all_cells",
             "btn_cells_minus",
             "btn_cells_plus",
@@ -5056,38 +4773,6 @@ class RiskVolumeApp(QMainWindow):
         self._hotkey_ids[key_name] = hotkey_id
         self.settings[key_name] = fallback
 
-    def _delayed_rebind_hotkeys(self):
-        """Отложенная регистрация горячих клавиш для избежания фоновых окон при старте."""
-        try:
-            self.rebind_hotkeys()
-        except Exception:
-            pass
-
-    def _delayed_init_keyboard_module(self):
-        """Инициализирует keyboard модуль после полной загрузки UI и фокуса главного окна."""
-        try:
-            # Убедиться что главное окно в фокусе и видимо
-            if not self.isVisible():
-                self.show()
-            self.activateWindow()
-            self.raise_()
-            
-            # Запустим в фоновом потоке чтобы не блокировать UI
-            def _init_keyboard_in_thread():
-                try:
-                    # Небольшая дополнительная задержка в потоке
-                    import time
-                    time.sleep(0.5)
-                    if self._ensure_keyboard_module():
-                        self.rebind_hotkeys()
-                except Exception:
-                    pass
-
-            init_thread = threading.Thread(target=_init_keyboard_in_thread, daemon=True)
-            init_thread.start()
-        except Exception:
-            pass
-
     def rebind_hotkeys(self):
         if not self._ensure_keyboard_module():
             return
@@ -5138,19 +4823,29 @@ class RiskVolumeApp(QMainWindow):
             if not self.is_cursor_over_window():
                 return
 
-            if hasattr(self, "tabs") and self.tabs.currentIndex() == 1:
-                self.tab_cascade.run_automation()
-            else:
+            # ПРОВЕРЯЕМ, КАКАЯ ВКЛАДКА ОТКРЫТА
+            current_idx = self.tabs.currentIndex()
+
+            if current_idx == 0:
+                # Вкладка калькулятора -> обновляем расчёт и вставляем объем
                 self.update_calc()
                 self.send_volume_to_terminal()
+            elif current_idx == 1:
+                # Вкладка каскадов -> выставляем ордера
+                self.tab_cascade.run_automation()
         finally:
             self.apply_running = False
 
     def handle_hotkey_calibration(self):
-        if hasattr(self, "tabs") and self.tabs.currentIndex() == 1:
+        if not hasattr(self, "tabs"):
+            return
+
+        current_idx = self.tabs.currentIndex()
+        if current_idx == 1 and hasattr(self, "tab_cascade"):
             self.tab_cascade.handle_calibration_hotkey()
-        else:
-            self.capture_coords()
+            return
+
+        self.capture_coords()
 
     def _cancel_active_calibration(self):
         if hasattr(self, "tab_cascade") and self.tab_cascade.is_apply_active():
@@ -5174,13 +4869,6 @@ class RiskVolumeApp(QMainWindow):
 
     # Обработка нажатия Enter на клавиатуре (когда фокус в программе)
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F2:
-            if hasattr(self, "tabs") and self.tabs.currentIndex() == 1:
-                self.tab_cascade.handle_calibration_hotkey()
-            else:
-                self.capture_coords()
-            event.accept()
-            return
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):
@@ -5201,12 +4889,7 @@ class RiskVolumeApp(QMainWindow):
 
         t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
         active_rows = sorted(self._get_active_rows_for_table())
-        is_reversed = bool(
-            self.settings.get(
-                self._cells_reversed_setting_key(),
-                False,
-            )
-        )
+        is_reversed = self.settings.get("cells_reversed", False)
         if is_reversed:
             active_rows = list(reversed(active_rows))
 
@@ -5309,11 +4992,10 @@ class RiskVolumeApp(QMainWindow):
                     pass
 
                 menu_kind = self._menu_terminal_kind() or "tiger"
-                is_tiger_trade = menu_kind == "tiger"
-                open_menu_settle_delay = 0.06 if is_tiger_trade else 0.03
-                post_paste_settle_delay = 0.025 if is_tiger_trade else 0.012
-                between_cells_delay = 0.05 if is_tiger_trade else 0.025
-                close_menu_delay = 0.06 if is_tiger_trade else 0.03
+                open_menu_settle_delay = 0.03
+                post_paste_settle_delay = 0.012
+                between_cells_delay = 0.025
+                close_menu_delay = 0.03
 
                 requires_final_point = self._menu_terminal_requires_final_point()
                 for batch_index, (glass, points) in enumerate(target_batches):
@@ -5344,24 +5026,24 @@ class RiskVolumeApp(QMainWindow):
 
                     pyautogui.moveTo(t_open[0], t_open[1], duration=0.015)
                     pyautogui.click()
-                    time.sleep(0.02 if is_tiger_trade else 0.012)
+                    time.sleep(0.012)
                     pyautogui.doubleClick(interval=0.03)
                     time.sleep(open_menu_settle_delay)
 
                     for transfer_index, (point_index, vol_to_send) in enumerate(transfers):
                         pyperclip.copy(vol_to_send)
-                        time.sleep(0.015 if is_tiger_trade else 0.01)
+                        time.sleep(0.01)
                         pyautogui.moveTo(
                             points[point_index][0], points[point_index][1], duration=0.015
                         )
                         pyautogui.click()
-                        time.sleep(0.02 if is_tiger_trade else 0.012)
+                        time.sleep(0.012)
                         pyautogui.doubleClick(interval=0.03)
-                        time.sleep(0.02 if is_tiger_trade else 0.012)
+                        time.sleep(0.012)
                         keyboard.press_and_release("ctrl+a")
-                        time.sleep(0.015 if is_tiger_trade else 0.01)
+                        time.sleep(0.01)
                         keyboard.press_and_release("backspace")
-                        time.sleep(0.015 if is_tiger_trade else 0.01)
+                        time.sleep(0.01)
                         keyboard.press_and_release("ctrl+v")
                         time.sleep(post_paste_settle_delay)
                         if transfer_index < len(transfers) - 1:
@@ -5377,7 +5059,7 @@ class RiskVolumeApp(QMainWindow):
                         time.sleep(close_menu_delay)
 
                     if batch_index < len(target_batches) - 1:
-                        time.sleep(0.06 if is_tiger_trade else 0.04)
+                        time.sleep(0.04)
             else:
                 try:
                     pyautogui.MINIMUM_SLEEP = 0.0005
@@ -5520,12 +5202,39 @@ class RiskVolumeApp(QMainWindow):
         if len(points) >= cells_count:
             self.calc_calibration_active = False
             t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
-            ready_text = t["calc_calib_exists"].format(cells=cells_count)
+            if self._is_profit_forge_terminal() and self._get_pf_glasses_count() > 1:
+                ready_text = t.get(
+                    "calc_calib_exists_glass",
+                    "✓ Калибровка уже есть: {cells} ячеек ({glass})",
+                ).format(cells=cells_count, glass=self._pf_glass_label(self._get_pf_active_glass()))
+            else:
+                ready_text = t["calc_calib_exists"].format(cells=cells_count)
             self._set_ready_status_with_neutral_timeout(ready_text)
             self.update_calibration_status()
             return
 
         self.calc_calibration_active = True
+
+        # Показываем подробную инструкцию
+        t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
+        if self._is_profit_forge_terminal() and self._get_pf_glasses_count() > 1:
+            instruction = t.get(
+                "calc_calib_instruction_glass",
+                "Калибровка активирована для {glass}.\n\nЗахвати {cells} ячеек выбора объема, нажимая {hotkey} по порядку.",
+            ).format(
+                glass=self._pf_glass_label(self._get_pf_active_glass()),
+                cells=cells_count,
+                hotkey=hk_coords,
+            )
+        else:
+            instruction = t["calc_calib_instruction"].format(
+                cells=cells_count, hotkey=hk_coords
+            )
+
+        self.lbl_status.setText(instruction)
+        self.lbl_status.setStyleSheet(
+            "color: #FFD700; font-size: 6pt; line-height: 130%;"
+        )
         self.update_calibration_status()
 
     def capture_coords(self):
@@ -5622,16 +5331,14 @@ class RiskVolumeApp(QMainWindow):
             self.update_calibration_status()
             return
 
-        points = self._get_shared_active_calibration_points()
+        points = self._get_active_calc_points()
 
         # Если уже есть достаточно - не захватываем дальше
         if len(points) >= cells_count:
-            self.calc_calibration_active = False
-            self.update_calibration_status()
             return
 
         points.append([x, y])
-        self._set_shared_active_calibration_points(points)
+        self._set_active_calc_points(points)
         self.save_settings()
 
         if len(points) >= cells_count:
@@ -5651,8 +5358,8 @@ class RiskVolumeApp(QMainWindow):
 
     def update_calibration_status(self):
         """Обновляет подсказку о калибровке при переключении вкладок"""
-        # Обновляем, если мы на вкладке калькулятора или если вкладок вообще нет.
-        if not hasattr(self, "tabs") or self.tabs.currentIndex() == 0:
+        # Обновляем только если мы на вкладке калькулятора
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == 0:
             self._update_status_text()
 
     def _set_ready_status_with_neutral_timeout(self, text, ready_color="#38BE1D", delay_ms=5000):
@@ -5778,7 +5485,14 @@ class RiskVolumeApp(QMainWindow):
                 )
                 self.lbl_status.setStyleSheet(f"color: cyan; font-size: {status_pt}pt;")
             else:
-                self.lbl_status.setText("")
+                t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
+                self.lbl_status.setText(
+                    t.get(
+                        "calc_need_start",
+                        "Нужно выполнить калибровку, для начала нажми {hotkey}",
+                    ).format(hotkey=hk_coords)
+                    + (pf_status_suffix if pf_status_suffix else "")
+                )
                 self.lbl_status.setStyleSheet(f"color: #666; font-size: {status_pt}pt;")
         elif points_count < cells_count:
             t = TRANS.get(self.settings.get("lang", "ru"), TRANS["ru"])
@@ -5904,45 +5618,47 @@ class RiskVolumeApp(QMainWindow):
                     item.setFlags(default_flags)
 
     def toggle_cells_order(self):
-        """Переворачивает порядок ячеек и % от общего в активном режиме."""
-        if not hasattr(self, "cells_table"):
-            return
-
-        pos_mode = bool(self.settings.get("pos_mode_enabled", False))
-        reverse_key = "cells_reversed_pos" if pos_mode else "cells_reversed"
-
+        """Переворачивает порядок ячеек в таблице"""
         cells_count = 5
+
+        # Собираем текущие проценты для всех 5 строк
         percentages = []
         for i in range(cells_count):
             item = self.cells_table.item(i, 2)
             if item and item.text():
                 try:
                     percentages.append(int(item.text()))
-                except Exception:
+                except:
                     percentages.append(0)
             else:
                 percentages.append(0)
 
-        reversed_percentages = list(reversed(percentages))
+        # Переворачиваем порядок
+        percentages.reverse()
 
+        # Отключаем сигнал
         try:
             self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
-        except Exception:
+        except:
             pass
 
+        # Применяем перевернутые значения
         for i in range(cells_count):
             item = self.cells_table.item(i, 2)
             if item:
-                item.setText(str(reversed_percentages[i]))
+                item.setText(str(percentages[i]))
 
-        try:
-            self.cells_table.itemChanged.connect(self.on_table_item_changed)
-        except Exception:
-            pass
+        # Включаем сигнал обратно
+        self.cells_table.itemChanged.connect(self.on_table_item_changed)
 
-        self.settings[reverse_key] = not bool(self.settings.get(reverse_key, False))
+        # Переключаем флаг
+        self.settings["cells_reversed"] = not self.settings.get("cells_reversed", False)
+
+        # Обновляем подписи ячеек
         self.update_cells_labels()
         self._update_selected_rows_visuals()
+
+        # Обновляем расчеты и сохраняем
         self.update_cell_volumes()
         self.save_cell_settings()
 
@@ -6003,7 +5719,13 @@ class RiskVolumeApp(QMainWindow):
 
         # Загружаем сохраненные значения процентов только для режима "Вручную"
         if preset_index == 2:
-            saved_multipliers = self._get_manual_distribution_values()
+            saved_multipliers = self.settings.get(
+                "scalp_manual_multipliers",
+                self.settings.get("scalp_multipliers", [100, 50, 25, 10, 0]),
+            )
+            is_reversed = self.settings.get("cells_reversed", False)
+            if is_reversed:
+                saved_multipliers = list(reversed(saved_multipliers))
 
             # Use actual active rows (which may include target row beyond cells_count)
             active_rows = self._get_active_rows_for_table()
@@ -6035,8 +5757,7 @@ class RiskVolumeApp(QMainWindow):
             return
 
         cells_count = int(self.lbl_cells_count.text())
-        pos_mode = bool(self.settings.get("pos_mode_enabled", False))
-        is_reversed = bool(self.settings.get("cells_reversed_pos" if pos_mode else "cells_reversed", False))
+        is_reversed = self.settings.get("cells_reversed", False)
 
         active_labels = list(range(1, cells_count + 1))
         if is_reversed:
@@ -6144,9 +5865,6 @@ class RiskVolumeApp(QMainWindow):
             if not bool(self.settings.get("pos_mode_enabled", False)):
                 self.settings["selected_cells"] = sorted(selected)
 
-            if bool(self.settings.get("pos_mode_enabled", False)) and self.cb_distribution.currentIndex() == 2:
-                self._capture_manual_distribution_snapshot_from_table()
-
             preset_index = self.cb_distribution.currentIndex()
             if preset_index != 2:
                 try:
@@ -6156,12 +5874,11 @@ class RiskVolumeApp(QMainWindow):
                 self._apply_preset_values(preset_index)
                 self.cells_table.itemChanged.connect(self.on_table_item_changed)
 
-            # In manual mode we must preserve the last user-entered values instead of
-            # forcing the selected cell to 100% when rows are toggled on/off.
-            if preset_index == 2:
-                self._capture_manual_distribution_snapshot_from_table()
-                self._restore_manual_distribution_for_active_rows(selected)
-            elif bool(self.settings.get("pos_mode_enabled", False)):
+            # If position-mode is enabled and we have a calculated adjustment volume,
+            # ensure that selecting a single cell places the whole adjustment into that cell
+            # (so user can move it to terminal in one cell). This prevents showing empty
+            # percent column and fallback to min-order value.
+            if bool(self.settings.get("pos_mode_enabled", False)):
                 override = float(getattr(self, "table_volume_override", 0.0) or 0.0)
                 if override <= 0:
                     override = float(self.settings.get("pos_table_volume_override", 0.0) or 0.0)
@@ -6169,6 +5886,7 @@ class RiskVolumeApp(QMainWindow):
                         self.table_volume_override = override
                 delta = float(getattr(self, "pos_adjust_delta", 0.0) or 0.0)
                 if (override > 0) or (delta > 0):
+                    # If exactly one cell selected, put 100% into it
                     if len(selected) == 1:
                         target_row = next(iter(selected))
                         try:
@@ -6245,45 +5963,6 @@ class RiskVolumeApp(QMainWindow):
                     editor.setSelection(0, len(editor.text()))
 
 
-    def _persist_manual_percent_snapshot(self, values=None, pos_mode=None):
-        """Immediately writes the current manual percentages to settings.
-
-        Blank cells during row toggles or partial edits must preserve the last
-        non-zero manual value instead of being rewritten to zero, otherwise a
-        single clear operation wipes the entire manual distribution snapshot.
-        """
-        if pos_mode is None:
-            pos_mode = bool(self.settings.get("pos_mode_enabled", False))
-
-        previous_values = self._get_manual_distribution_values(pos_mode=pos_mode)
-
-        if values is None:
-            values = []
-            for i in range(5):
-                cell = self.cells_table.item(i, 2) if hasattr(self, "cells_table") else None
-                text = (cell.text() if cell else "") or ""
-                text = str(text).strip()
-                if not text:
-                    values.append(int(previous_values[i]) if i < len(previous_values) else 0)
-                    continue
-                try:
-                    values.append(max(0, min(100, int(text))))
-                except Exception:
-                    values.append(int(previous_values[i]) if i < len(previous_values) else 0)
-
-        values = [max(0, min(100, int(v))) for v in values[:5]] + [0] * max(0, 5 - len(values[:5]))
-        manual_key = self._manual_distribution_setting_key(pos_mode)
-        if bool(pos_mode):
-            self.settings[manual_key] = list(values)
-            self.settings["scalp_multipliers"] = list(values)
-        else:
-            self.settings["scalp_manual_multipliers"] = list(values)
-            self.settings[manual_key] = list(values)
-            self.settings["scalp_multipliers"] = list(values)
-        self.settings[self._distribution_type_setting_key(pos_mode)] = int(
-            self.cb_distribution.currentIndex() if hasattr(self, "cb_distribution") else 2
-        )
-
     def on_table_item_changed(self, item):
         """Вызывается когда изменяется ячейка таблицы"""
         if item.column() == 2:  # Только для колонки с процентами
@@ -6293,33 +5972,12 @@ class RiskVolumeApp(QMainWindow):
             ):
                 return
 
+            # Проверяем что введено число
             text = item.text().strip()
-            if text == "":
-                self._capture_current_manual_distribution()
-                self._persist_manual_percent_snapshot()
-                self.update_cell_volumes()
-                self.save_cell_settings()
-                self._schedule_smooth_content_resize(force=True)
-                return
-
-            try:
-                value = int(text)
-            except ValueError:
-                item.setText("")
-                self._capture_current_manual_distribution()
-                self._persist_manual_percent_snapshot()
-                self.update_cell_volumes()
-                self.save_cell_settings()
-                self._schedule_smooth_content_resize(force=True)
-                return
-
-            value = max(0, min(100, value))
-            normalized = str(value)
-            if normalized != text:
-                item.setText(normalized)
+            if text and not text.isdigit():
+                item.setText("0")
 
             self._capture_current_manual_distribution()
-            self._persist_manual_percent_snapshot()
             self.update_cell_volumes()
             self.save_cell_settings()
             self._schedule_smooth_content_resize(force=True)
@@ -6344,9 +6002,6 @@ class RiskVolumeApp(QMainWindow):
             if hasattr(self, "cb_distribution")
             else 2
         )
-        if preset_index == 2:
-            self._capture_manual_distribution_snapshot_from_table()
-
         if preset_index != 2:
             try:
                 self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
@@ -6354,23 +6009,16 @@ class RiskVolumeApp(QMainWindow):
                 pass
             self._apply_preset_values(preset_index)
             self.cells_table.itemChanged.connect(self.on_table_item_changed)
-        elif preset_index == 2:
-            self._restore_manual_distribution_for_active_rows(selected)
 
         self._update_selected_rows_visuals()
         self.update_cell_volumes()
         self.save_cell_settings()
 
     def finalize_startup_layout(self):
-        logging.debug("finalize_startup_layout START")
         self.update_cells_table_height()
-        logging.debug("update_cells_table_height done")
         self._adapt_window_width_to_content()
-        logging.debug("_adapt_window_width_to_content done")
         self._set_window_size_with_extra_height()
-        logging.debug("_set_window_size_with_extra_height done")
         self._ensure_window_on_screen(margin=6, prefer_active=True)
-        logging.debug("_ensure_window_on_screen done")
         if self._startup_window_size is None:
             self._startup_window_size = (int(self.width()), int(self.height()))
         if not self._resize_len_baseline:
@@ -6392,8 +6040,7 @@ class RiskVolumeApp(QMainWindow):
     def _apply_preset_values(self, preset_index):
         """Применяет значения выбранного пресета"""
         active_rows = self._get_active_rows_for_table()
-        reverse_key = self._cells_reversed_setting_key()
-        if bool(self.settings.get(reverse_key, False)):
+        if self.settings.get("cells_reversed", False):
             active_rows = list(reversed(active_rows))
         cells_count = len(active_rows)
 
@@ -6429,11 +6076,27 @@ class RiskVolumeApp(QMainWindow):
             if item:
                 item.setText(str(values[idx]))
 
-    def _get_manual_distribution_values(self, pos_mode=None):
+    def _capture_current_manual_distribution(self, pos_mode=None):
+        if not hasattr(self, "cells_table"):
+            return
+
+        manual_values = []
+        for i in range(5):
+            item = self.cells_table.item(i, 2)
+            text = (item.text() if item else "") or ""
+            text = str(text).strip()
+            manual_values.append(int(text) if text.isdigit() else 0)
+
         if pos_mode is None:
             pos_mode = bool(self.settings.get("pos_mode_enabled", False))
         key = self._manual_distribution_setting_key(pos_mode)
-        saved = self.settings.get(key, None)
+        self.settings[key] = manual_values
+
+    def _restore_manual_distribution(self):
+        if not hasattr(self, "cells_table"):
+            return
+
+        saved = self.settings.get(self._manual_distribution_setting_key(), None)
         if saved is None:
             saved = self.settings.get(
                 "scalp_manual_multipliers",
@@ -6441,76 +6104,10 @@ class RiskVolumeApp(QMainWindow):
             )
         if not isinstance(saved, list):
             saved = [100, 50, 25, 10, 0]
-        return list(saved)[:5] + [0] * max(0, 5 - len(saved))
+        saved = list(saved)[:5] + [0] * max(0, 5 - len(saved))
 
-    def _capture_current_manual_distribution(self, pos_mode=None):
-        if not hasattr(self, "cells_table"):
-            return
-
-        previous_values = self._get_manual_distribution_values(
-            pos_mode=bool(self.settings.get("pos_mode_enabled", False))
-            if pos_mode is None
-            else pos_mode
-        )
-
-        manual_values = []
-        for i in range(5):
-            item = self.cells_table.item(i, 2)
-            text = (item.text() if item else "") or ""
-            text = str(text).strip()
-            if not text or not text.isdigit():
-                manual_values.append(int(previous_values[i]) if i < len(previous_values) else 0)
-                continue
-            manual_values.append(max(0, min(100, int(text))))
-
-        if pos_mode is None:
-            pos_mode = bool(self.settings.get("pos_mode_enabled", False))
-        key = self._manual_distribution_setting_key(pos_mode)
-        self.settings[key] = manual_values
-        if bool(pos_mode):
-            self.settings["scalp_multipliers"] = list(manual_values)
-        else:
-            self.settings["scalp_manual_multipliers"] = list(manual_values)
-            self.settings["scalp_multipliers"] = list(manual_values)
-
-    def _capture_manual_distribution_snapshot_from_table(self, pos_mode=None):
-        """Сохраняет текущие проценты, но не затирает старые ручные значения пустыми ячейками."""
-        if not hasattr(self, "cells_table"):
-            return
-        if pos_mode is None:
-            pos_mode = bool(self.settings.get("pos_mode_enabled", False))
-
-        previous_values = self._get_manual_distribution_values(pos_mode=pos_mode)
-        manual_values = []
-        for i in range(5):
-            item = self.cells_table.item(i, 2)
-            text = (item.text() if item else "") or ""
-            text = str(text).strip()
-            if not text:
-                manual_values.append(int(previous_values[i]) if i < len(previous_values) else 0)
-                continue
-            try:
-                val = int(text)
-                manual_values.append(max(0, min(100, val)))
-            except Exception:
-                manual_values.append(int(previous_values[i]) if i < len(previous_values) else 0)
-        self.settings[self._manual_distribution_setting_key(pos_mode)] = manual_values
-
-    def _restore_manual_distribution(self):
-        if not hasattr(self, "cells_table"):
-            return
-
-        saved = self._get_manual_distribution_values()
-        # Keep stored manual values in their actual row order. The reverse button
-        # should be the only place that flips the order visually.
-
-        # Guard against stale zero snapshots from older runs. If the current manual
-        # key is empty/zero but the generic manual key has real values, prefer the
-        # real values when restoring the table.
-        if not any(int(v) > 0 for v in saved):
-            generic_saved = self.settings.get("scalp_manual_multipliers", saved)
-            if isinstance(generic_saved, list) and any(int(v) > 0 for v in generic_saved):
-                saved = list(generic_saved)
+        if self.settings.get("cells_reversed", False):
+            saved = list(reversed(saved))
 
         active_rows = set(self._get_active_rows_for_table())
         for i in range(5):
@@ -6525,83 +6122,6 @@ class RiskVolumeApp(QMainWindow):
 
         self._apply_manual_active_row_flags()
 
-    def _restore_manual_distribution_for_active_rows(self, selected_rows=None):
-        if not hasattr(self, "cells_table"):
-            return
-        if hasattr(self, "cb_distribution") and int(self.cb_distribution.currentIndex()) != 2:
-            return
-
-        pos_mode = bool(self.settings.get("pos_mode_enabled", False))
-
-        if selected_rows is None:
-            selected_rows = set(self._get_active_rows_for_table())
-        else:
-            selected_rows = {
-                int(i)
-                for i in selected_rows
-                if isinstance(i, (int, str)) and 0 <= int(i) < 5
-            }
-
-        # Preserve the last valid percentage for each row before clearing inactive ones.
-        # A row may be temporarily hidden while toggling, but its previous manual value
-        # must remain in the snapshot so re-enabling it restores the original value
-        # instead of empty/zero, while position mode keeps the special 100% fallback.
-        previous_values = self._get_manual_distribution_values(pos_mode=pos_mode)
-        manual_snapshot = []
-        for i in range(5):
-            item = self.cells_table.item(i, 2)
-            text = (item.text() if item else "") or ""
-            text = str(text).strip()
-            if text:
-                try:
-                    manual_snapshot.append(max(0, min(100, int(text))))
-                    continue
-                except Exception:
-                    pass
-            manual_snapshot.append(int(previous_values[i]) if i < len(previous_values) else 0)
-        self.settings[self._manual_distribution_setting_key(pos_mode)] = manual_snapshot
-
-        saved = list(manual_snapshot)
-        if not any(int(v) > 0 for v in saved):
-            persisted = self._get_manual_distribution_values(pos_mode=pos_mode)
-            if any(int(v) > 0 for v in persisted):
-                saved = list(persisted)
-
-        # Preserve the underlying row-based percentage snapshot. The reverse button
-        # changes only the visible display order, not the stored per-row values.
-        # If we reverse here again, toggling an individual cell flips the values a
-        # second time even when the reverse command was not pressed.
-        has_real_manual_value = any(int(v) > 0 for v in saved)
-        try:
-            self.cells_table.itemChanged.disconnect(self.on_table_item_changed)
-        except Exception:
-            pass
-        try:
-            for i in range(5):
-                item = self.cells_table.item(i, 2)
-                if not item:
-                    continue
-                if i in selected_rows:
-                    val = 0
-                    if i < len(saved):
-                        try:
-                            val = int(saved[i])
-                        except Exception:
-                            val = 0
-                    if val > 0:
-                        item.setText(str(val))
-                    elif pos_mode and len(selected_rows) == 1 and min(selected_rows) == i and not has_real_manual_value:
-                        item.setText("100")
-                    else:
-                        item.setText("")
-                else:
-                    item.setText("")
-        finally:
-            try:
-                self.cells_table.itemChanged.connect(self.on_table_item_changed)
-            except Exception:
-                pass
-
     def _distribution_type_setting_key(self, pos_mode_enabled=None):
         if pos_mode_enabled is None:
             pos_mode_enabled = bool(self.settings.get("pos_mode_enabled", False))
@@ -6611,14 +6131,7 @@ class RiskVolumeApp(QMainWindow):
             else "scalp_distribution_type"
         )
 
-    def _cells_reversed_setting_key(self, pos_mode_enabled=None):
-        if pos_mode_enabled is None:
-            pos_mode_enabled = bool(self.settings.get("pos_mode_enabled", False))
-        return "cells_reversed_pos" if bool(pos_mode_enabled) else "cells_reversed"
-
-    def _manual_distribution_setting_key(self, pos_mode_enabled=None, pos_mode=None):
-        if pos_mode is not None:
-            pos_mode_enabled = pos_mode
+    def _manual_distribution_setting_key(self, pos_mode_enabled=None):
         if pos_mode_enabled is None:
             pos_mode_enabled = bool(self.settings.get("pos_mode_enabled", False))
         return (
@@ -6671,8 +6184,7 @@ class RiskVolumeApp(QMainWindow):
         self.cells_table.itemChanged.connect(self.on_table_item_changed)
         self._update_selected_rows_visuals()
         self.update_cell_volumes()
-        if not bool(getattr(self, "_startup_restore_suppressed", False)):
-            self.save_cell_settings()
+        self.save_cell_settings()
 
     def _selected_rows_setting_key(self, pos_mode_enabled=None):
         if pos_mode_enabled is None:
@@ -6840,61 +6352,32 @@ class RiskVolumeApp(QMainWindow):
         else:
             cells_count = int(self.lbl_cells_count.text())
         multipliers = []
-        is_manual_mode = hasattr(self, "cb_distribution") and int(self.cb_distribution.currentIndex()) == 2
-        saved_manual = self._get_manual_distribution_values(
-            pos_mode=bool(self.settings.get("pos_mode_enabled", False))
-        )
 
-        for i in range(5):
-            item = self.cells_table.item(i, 2)
+        for i in range(5):  # Сохраняем все 5 значений
+            item = self.cells_table.item(i, 2)  # Колонка с процентами
             if item:
                 val = item.text().strip()
-                if not val:
-                    if is_manual_mode and i < len(saved_manual):
-                        mult = int(saved_manual[i])
-                    else:
-                        mult = 0
-                else:
-                    try:
-                        mult = int(val)
-                    except Exception:
-                        mult = int(saved_manual[i]) if is_manual_mode and i < len(saved_manual) else 0
-                multipliers.append(max(0, min(100, mult)))
+                try:
+                    mult = int(val) if val else 0
+                except:
+                    mult = 0
+                multipliers.append(mult)
 
+        # Сохраняем мин.ордер
         try:
-            min_order_text = self.inp_min_order.text().replace(",", ".")
-            min_order = float(min_order_text) if min_order_text else 6
-        except Exception:
+            min_order = float(self.inp_min_order.text().replace(",", ".") or 6)
+        except:
             min_order = 6
 
+        # Если таблица перевернута, сохраняем multipliers в обратном порядке для корректного отображения
+        is_reversed = self.settings.get("cells_reversed", False)
+        if is_reversed:
+            multipliers.reverse()
+
         self._set_terminal_cells_count(cells_count)
-
-        mode_is_pos = bool(self.settings.get("pos_mode_enabled", False))
-        distribution_key = self._distribution_type_setting_key(mode_is_pos)
-        current_dist_index = int(
-            self.cb_distribution.currentIndex() if hasattr(self, "cb_distribution") else 2
-        )
-
-        self.settings[distribution_key] = current_dist_index
-        self.settings["scalp_multipliers"] = list(multipliers)
-
-        if not mode_is_pos:
-            self.settings["scalp_distribution_type"] = current_dist_index
-
-        # Preserve the last manual snapshot while a preset (equal/decreasing) is active.
-        # Otherwise switching back to manual restores the preset values instead of the
-        # last user-defined manual values.
-        if is_manual_mode:
-            manual_key = self._manual_distribution_setting_key(mode_is_pos)
-            self.settings[manual_key] = list(multipliers)
-            if not mode_is_pos:
-                self.settings["scalp_manual_multipliers"] = list(multipliers)
-
+        self.settings["scalp_multipliers"] = multipliers
         self.settings["scalp_min_order"] = min_order
-        self.settings["cells_reversed"] = bool(self.settings.get("cells_reversed", False))
-        self.settings["cells_reversed_pos"] = bool(
-            self.settings.get("cells_reversed_pos", False)
-        )
+        self.settings["cells_reversed"] = is_reversed
         self.save_settings()
 
     def is_cursor_over_window(self):
@@ -6912,19 +6395,29 @@ class RiskVolumeApp(QMainWindow):
             pos = e.globalPosition().toPoint()
             self._clear_ghost_focus()
 
-            # Разрешаем перетаскивание по свободным участкам окна
-            widget = self.childAt(self.mapFromGlobal(pos))
-            non_draggable_types = (
-                QLineEdit,
-                QPushButton,
-                QComboBox,
-                QCheckBox,
-                QTableWidget,
-                QSpinBox,
-                QDoubleSpinBox,
-            )
+            # На вкладках калькулятора и каскадов - разрешаем везде кроме интерактивных элементов
+            if hasattr(self, "tabs") and self.tabs.currentIndex() in (0, 1):
+                # Проверяем что клик не попал на интерактивный элемент
+                widget = self.childAt(self.mapFromGlobal(pos))
 
-            if not widget or not isinstance(widget, non_draggable_types):
+                # Разрешаем перетаскивание если клик не на таких элементах
+                non_draggable_types = (
+                    QLineEdit,
+                    QPushButton,
+                    QComboBox,
+                    QCheckBox,
+                    QTableWidget,
+                    QSpinBox,
+                    QDoubleSpinBox,
+                )
+
+                if not widget or not isinstance(widget, non_draggable_types):
+                    # Клик в пустое место - очищаем ghost focus
+                    self.old_pos = pos
+                else:
+                    self.old_pos = None
+            # На других вкладках - только по верхней полосе
+            elif pos.y() < 30:
                 self.old_pos = pos
             else:
                 self.old_pos = None
@@ -7232,7 +6725,8 @@ class RiskVolumeApp(QMainWindow):
                 return True
         if (
             hasattr(self, "tab_calculator")
-            and obj is self.tab_calculator
+            and hasattr(self, "tab_cascade")
+            and obj in (self.tab_calculator, self.tab_cascade)
             and event.type() == event.Type.MouseButtonPress
         ):
             self._clear_ghost_focus()
@@ -7290,28 +6784,34 @@ class RiskVolumeApp(QMainWindow):
             self.settings["pos_table_volume_override"] = float(
                 getattr(self, "table_volume_override", 0.0) or 0.0
             )
-            try:
-                self.save_cell_settings()
-            except Exception:
-                self.save_settings()
+            self.save_cell_settings()
         except Exception:
-            self.save_settings()
+            pass
+
+    def _reveal_startup_window(self):
+        if self._startup_reveal_done:
+            return
+        self._startup_reveal_done = True
+        try:
+            self.setWindowOpacity(1.0)
+        except Exception:
+            pass
+        self._start_startup_window_suppression()
+        if not self._hotkeys_initialized:
+            try:
+                self.rebind_hotkeys()
+                self._hotkeys_initialized = True
+            except Exception:
+                pass
+        try:
+            self._apply_auto_deposit_sync(force_now=True)
+        except Exception:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self._startup_reveal_done:
             QTimer.singleShot(0, self._reveal_startup_window)
-
-    def _reveal_startup_window(self):
-        """Reveal the window by restoring opacity from 0 to 1"""
-        logging.debug("_reveal_startup_window: Revealing window")
-        try:
-            self.setWindowOpacity(1.0)
-            self._startup_reveal_done = True
-            logging.debug("_reveal_startup_window: Window opacity set to 1.0")
-        except Exception as e:
-            logging.debug(f"_reveal_startup_window: Error - {e}")
-            self._startup_reveal_done = True
 
     def _start_startup_window_suppression(self):
         if sys.platform != "win32":
@@ -7370,9 +6870,10 @@ class RiskVolumeApp(QMainWindow):
 
 
 if __name__ == "__main__":
-    logging.debug("=== Application startup ===")
+    multiprocessing.freeze_support()
+    _relaunch_with_pythonw_if_needed()
     _hide_console_window_on_windows()
-    logging.debug("console hidden")
+    _configure_windows_multiprocessing_executable()
     existing_qt_rules = os.environ.get("QT_LOGGING_RULES", "")
     dpi_noise_rule = "qt.qpa.window.warning=false"
     if dpi_noise_rule not in existing_qt_rules:
@@ -7383,33 +6884,22 @@ if __name__ == "__main__":
         )
 
     # Защита от множественного запуска
-    logging.debug("Creating shared memory")
     shared_memory = QSharedMemory("RiskVolume_single_instance_v1")
     if not shared_memory.create(1):
-        logging.debug("Shared memory already exists - another instance running")
         # Пытаемся очистить "зависший" сегмент и выходим, если уже запущено
         if shared_memory.attach():
             shared_memory.detach()
         if not shared_memory.create(1):
-            logging.debug("Exiting - another instance already running")
             sys.exit(0)
     _app_shared_memory_guard = shared_memory
-    logging.debug("Shared memory created successfully")
 
-    logging.debug("Creating QApplication")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    logging.debug("QApplication created, setting theme")
     _force_consistent_qt_theme(app)
-    logging.debug("Theme set, creating RiskVolumeApp window")
     win = RiskVolumeApp()
-    logging.debug("RiskVolumeApp window created")
 
     def _show_main_window():
-        logging.debug("Showing main window")
         win.show()
-        logging.debug("Main window shown")
 
     QTimer.singleShot(0, _show_main_window)
-    logging.debug("Starting event loop")
     sys.exit(app.exec())

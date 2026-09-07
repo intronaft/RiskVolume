@@ -1,0 +1,24 @@
+Назначение: перенос удаленной функциональности каскадов и Profit Forge из старой версии.
+
+Основной модуль:
+- source_snapshot/cascade_tab.py
+
+Интеграция:
+- source_snapshot/main.py
+- source_snapshot/calculator_tab.py
+- source_snapshot/settings_dialog.py
+- source_snapshot/translations.py
+- source_snapshot/config.py
+
+Зависимости:
+- source_snapshot/logic.py
+- source_snapshot/ui_components.py
+- source_snapshot/secure_credentials.py
+- source_snapshot/requirements.txt
+
+Настройки:
+- data/ScalpSettings_Py_legacy_template.json
+
+Снимки исходников являются справочником старой версии. Их нельзя бездумно
+копировать поверх новой версии: сначала сопоставь классы, сигналы, настройки и
+точки входа.
