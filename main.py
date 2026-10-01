@@ -257,9 +257,10 @@ def _fetch_balance_with_ccxt(payload):
                 )
                 if equity is not None:
                     return equity
-                if asset in total and total[asset] is not None:
-                    return float(total[asset])
-                return free_val + used_val
+                raise RuntimeError(
+                    f"{exchange_id}: realized wallet balance is missing; "
+                    "refusing a value that may include unrealized PnL"
+                )
 
             if asset in total and total[asset] is not None:
                 return float(total[asset])
@@ -272,32 +273,72 @@ def _fetch_balance_with_ccxt(payload):
 
 
 def _extract_cross_margin_equity(exchange_id, balance, asset):
-    """Return cross-margin equity from a CCXT balance response."""
+    """Return futures wallet balance without unrealized PnL from CCXT data."""
     if not isinstance(balance, dict):
         return None
 
     info = balance.get("info")
-    candidates = {
-        "bybit": ("totalEquity", "totalMarginBalance", "totalWalletBalance"),
-        "binance": ("totalMarginBalance", "totalCrossWalletBalance", "totalWalletBalance"),
-        "okx": ("totalEq", "equity", "cashBal"),
-        "bitget": ("accountEquity", "equity", "marginBalance"),
-        "gate": ("total", "equity", "marginBalance"),
-        "mexc": ("equity", "marginBalance", "walletBalance"),
-        "kucoin": ("accountEquity", "equity", "marginBalance"),
-    }.get(str(exchange_id or "").lower(), ("equity", "totalEquity", "marginBalance"))
+    exchange_id = str(exchange_id or "").lower()
+    wallet_fields = {
+        "bybit": ("totalWalletBalance", "walletBalance"),
+        "binance": (
+            "totalCrossWalletBalance",
+            "totalWalletBalance",
+            "crossWalletBalance",
+            "walletBalance",
+        ),
+        "okx": ("cashBal",),
+        "bitget": ("balance", "walletBalance"),
+        "gate": ("total", "walletBalance"),
+        "mexc": ("walletBalance", "balance"),
+        "kucoin": (
+            "accountEquityWithoutUnrealisedPNL",
+            "walletBalance",
+            "balance",
+        ),
+    }.get(
+        exchange_id,
+        ("walletBalance", "wallet_balance", "cashBal", "cash_balance", "balance"),
+    )
+    equity_fields = {
+        "bybit": ("totalEquity", "totalMarginBalance"),
+        "binance": ("totalMarginBalance",),
+        "okx": ("totalEq", "eq", "equity"),
+        "bitget": ("accountEquity", "equity"),
+        "gate": ("equity",),
+        "mexc": ("equity",),
+        "kucoin": ("accountEquity", "marginBalance"),
+    }.get(exchange_id, ("equity", "totalEquity", "marginBalance"))
+    unrealized_fields = (
+        "totalUnrealizedProfit",
+        "totalPerpUPL",
+        "crossUnPnl",
+        "unrealizedPnl",
+        "unrealisedPnl",
+        "unrealizedPL",
+        "unrealisedPNL",
+        "unrealized_pnl",
+        "upl",
+    )
+
+    def parse_number(value):
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def parse_amount(value):
+        parsed = parse_number(value)
+        return parsed if parsed is not None and parsed >= 0 else None
 
     def find_value(value, keys):
         if isinstance(value, dict):
             for key in keys:
-                candidate = value.get(key)
-                if candidate not in (None, ""):
-                    try:
-                        parsed = float(candidate)
-                    except (TypeError, ValueError):
-                        continue
-                    if parsed >= 0:
-                        return parsed
+                parsed = parse_amount(value.get(key))
+                if parsed is not None:
+                    return parsed
             for nested in value.values():
                 found = find_value(nested, keys)
                 if found is not None:
@@ -309,18 +350,61 @@ def _extract_cross_margin_equity(exchange_id, balance, asset):
                     return found
         return None
 
-    raw_equity = find_value(info, candidates)
-    if raw_equity is not None:
-        return raw_equity
+    wallet_balance = find_value(info, wallet_fields)
+    if wallet_balance is not None:
+        return wallet_balance
 
-    total = balance.get("total", {})
-    if isinstance(total, dict) and total.get(asset) not in (None, ""):
-        try:
-            parsed_total = float(total[asset])
-        except (TypeError, ValueError):
-            parsed_total = None
-        if parsed_total is not None and parsed_total >= 0:
-            return parsed_total
+    def find_realized_equity(value):
+        if isinstance(value, dict):
+            equity = next(
+                (
+                    parsed
+                    for key in equity_fields
+                    if (parsed := parse_amount(value.get(key))) is not None
+                ),
+                None,
+            )
+            unrealized = next(
+                (
+                    parsed
+                    for key in unrealized_fields
+                    if (parsed := parse_number(value.get(key))) is not None
+                ),
+                None,
+            )
+            if equity is not None and unrealized is not None:
+                return max(0.0, equity - unrealized)
+            for nested in value.values():
+                found = find_realized_equity(nested)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = find_realized_equity(nested)
+                if found is not None:
+                    return found
+        return None
+
+    adjusted_equity = find_realized_equity(info)
+    if adjusted_equity is not None:
+        return adjusted_equity
+
+    # Unknown exchange responses have no exchange-specific field mapping;
+    # CCXT's normalized total is retained only for that compatibility case.
+    if exchange_id not in {
+        "bybit",
+        "binance",
+        "okx",
+        "bitget",
+        "gate",
+        "mexc",
+        "kucoin",
+    }:
+        total = balance.get("total", {})
+        if isinstance(total, dict):
+            parsed_total = parse_amount(total.get(asset))
+            if parsed_total is not None:
+                return parsed_total
     return None
 
 
@@ -1452,7 +1536,7 @@ class RiskVolumeApp(QMainWindow):
         return float(result.get("balance", 0.0) or 0.0)
 
     def _fetch_bybit_unified_balance(self, api_key, api_secret, asset):
-        """Fetch total equity from Bybit Unified cross-margin account."""
+        """Fetch wallet balance from Bybit Unified, excluding perpetual UPL."""
         timestamp = str(int(time.time() * 1000))
         recv_window = "5000"
         query = urlencode({"accountType": "UNIFIED", "coin": asset})
@@ -1484,10 +1568,10 @@ class RiskVolumeApp(QMainWindow):
         rows = result.get("list", []) if isinstance(result, dict) else []
         if not rows:
             raise RuntimeError("Bybit: Unified wallet balance is empty")
-        equity = rows[0].get("totalEquity")
-        if equity in (None, ""):
-            raise RuntimeError("Bybit: totalEquity is missing")
-        return float(equity)
+        wallet_balance = rows[0].get("totalWalletBalance")
+        if wallet_balance in (None, ""):
+            raise RuntimeError("Bybit: totalWalletBalance is missing")
+        return float(wallet_balance)
 
     def _fetch_binance_balance_light(self, api_key, api_secret, market_type, asset, base_url=None):
         timestamp_ms = int(time.time() * 1000)
@@ -1511,23 +1595,20 @@ class RiskVolumeApp(QMainWindow):
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict):
-                value = data.get("totalMarginBalance")
-                if value not in (None, ""):
-                    return float(value or 0.0)
-                wallet = float(data.get("totalCrossWalletBalance", 0.0) or 0.0)
-                unrealized = float(data.get("totalUnrealizedProfit", 0.0) or 0.0)
-                if wallet or unrealized:
-                    return wallet + unrealized
+                for field in ("totalCrossWalletBalance", "totalWalletBalance"):
+                    value = data.get(field)
+                    if value not in (None, ""):
+                        return float(value or 0.0)
             assets = data.get("assets", []) if isinstance(data, dict) else []
             for row in assets:
                 if str(row.get("asset", "")).upper() == asset:
-                    margin = row.get("marginBalance")
-                    if margin not in (None, ""):
-                        return float(margin or 0.0)
-                    wallet = float(row.get("crossWalletBalance", 0.0) or 0.0)
-                    unrealized = float(row.get("crossUnPnl", 0.0) or 0.0)
-                    return wallet + unrealized
-            return 0.0
+                    for field in ("crossWalletBalance", "walletBalance"):
+                        value = row.get(field)
+                        if value not in (None, ""):
+                            return float(value or 0.0)
+            raise RuntimeError(
+                f"Binance futures: realized wallet balance for {asset} is missing"
+            )
 
         if base_url:
             url = f"{base_url.rstrip('/')}/api/v3/account?{query}&signature={signature}"
