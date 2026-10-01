@@ -1,6 +1,10 @@
 import unittest
 
-from calibration_state import reset_terminal_calibration_state, CALIBRATION_RESET_MARKER_KEY
+from calibration_state import (
+    CALIBRATION_RESET_MARKER_KEY,
+    CALIBRATION_RESET_VERSION,
+    reset_terminal_calibration_state,
+)
 
 
 class CalibrationStateTests(unittest.TestCase):
@@ -60,7 +64,10 @@ class CalibrationStateTests(unittest.TestCase):
         self.assertEqual(settings["pf_active_glass"], 1)
         self.assertEqual(settings["pf_selected_glasses"], [1])
         self.assertFalse(settings["pf_show_preview_frames"])
-        self.assertEqual(settings[CALIBRATION_RESET_MARKER_KEY], 2)
+        self.assertEqual(
+            settings[CALIBRATION_RESET_MARKER_KEY],
+            CALIBRATION_RESET_VERSION,
+        )
 
 
 if __name__ == "__main__":

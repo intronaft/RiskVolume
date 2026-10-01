@@ -1,5 +1,5 @@
 CALIBRATION_RESET_MARKER_KEY = "calibration_reset_marker"
-CALIBRATION_RESET_VERSION = 2
+CALIBRATION_RESET_VERSION = 3
 
 
 def reset_terminal_calibration_state(settings, expected_version=None):

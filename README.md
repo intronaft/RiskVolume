@@ -48,7 +48,7 @@
 https://www.virustotal.com/gui/file/63c154d239c93dfc1eab2bdcc431934df52943a5c7ec49410b2e406b7dfc7ca8?nocache=1
 
 ## Загрузка 💾
-Скачивание — через **GitHub Releases**: https://github.com/intronaft/RiskVolume/releases/tag/V1.5.7
+Скачивание — через **GitHub Releases**: https://github.com/intronaft/RiskVolume/releases/tag/V1.6
 - Загрузите RiskVolume.zip
 Распакуйте архив и запустите .exe файл и можно пользоваться ✅
 
@@ -58,7 +58,6 @@ https://www.virustotal.com/gui/file/63c154d239c93dfc1eab2bdcc431934df52943a5c7ec
 - ОЗУ: от 4 ГБ
 - Диск: от 100 МБ 
 - Доступ в интернет при включенной опции "автодепозит", для получения и обновления значений во вкладке "депозит" через API для чтения
-
 
 
 

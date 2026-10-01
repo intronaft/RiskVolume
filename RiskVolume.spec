@@ -2,10 +2,15 @@
 
 import json
 import os
+import sys
 
 
 _SPEC_PATH = globals().get('__file__', os.path.join(os.getcwd(), 'RiskVolume.spec'))
 _ROOT = os.path.dirname(os.path.abspath(_SPEC_PATH))
+sys.path.insert(0, _ROOT)
+from calibration_state import CALIBRATION_RESET_VERSION, reset_terminal_calibration_state
+
+
 _SRC_SETTINGS = os.path.join(_ROOT, 'ScalpSettings_Py.json')
 _SANITIZED_SETTINGS = os.path.join(_ROOT, 'build', 'ScalpSettings_Py.json')
 
@@ -20,7 +25,6 @@ def _build_sanitized_settings(src_path, dst_path):
     if not isinstance(data, dict):
         data = {}
 
-    # Preserve calibrated terminal points in the release build.
     credentials = data.get('auto_dep_credentials', {})
     if isinstance(credentials, dict):
         for exchange_id, exchange_credentials in credentials.items():
@@ -36,6 +40,10 @@ def _build_sanitized_settings(src_path, dst_path):
     data['auto_dep_connected'] = False
     data['auto_dep_connected_exchange'] = ''
     data['auto_dep_connected_market'] = ''
+    reset_terminal_calibration_state(
+        data,
+        expected_version=CALIBRATION_RESET_VERSION,
+    )
 
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     with open(dst_path, 'w', encoding='utf-8') as f:
@@ -52,7 +60,6 @@ a = Analysis(
     datas=[
         ('Logo', 'Logo'),
         (_SANITIZED_SETTINGS, '.'),
-        ('scalp_settings.json', '.'),
     ],
     hiddenimports=[
         'keyboard',
