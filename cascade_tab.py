@@ -1,4 +1,5 @@
 # cascade_tab.py
+import logging
 import time
 from PyQt6.QtWidgets import (
     QApplication,
@@ -64,6 +65,7 @@ class CascadeWorker(QThread):
 
     finished = pyqtSignal()
     cancelled = pyqtSignal()  # Сигнал об остановке по ESC
+    failed = pyqtSignal(str)
 
     def __init__(self, settings, orders_data, main_window, prev_count=None):
         super().__init__()
@@ -72,8 +74,20 @@ class CascadeWorker(QThread):
         self.main_window = main_window
         self.prev_count = prev_count
         self._cancelled = False
+        self._failed = False
 
     def run(self):
+        try:
+            self._run_automation()
+        except Exception as exc:
+            self._failed = True
+            logging.exception("Cascade automation failed")
+            self.failed.emit(str(exc))
+        finally:
+            if not self._cancelled and not self._failed:
+                self.finished.emit()
+
+    def _run_automation(self):
         import pyautogui
         import keyboard
         import pyperclip
@@ -91,7 +105,6 @@ class CascadeWorker(QThread):
 
         # Достаем координаты
         c_gear = self.settings.get("cas_p_gear")  # Шестеренка
-        c_left_scrollbar = self.settings.get("cas_p_left_scrollbar")  # Левый ползунок
         c_book = self.settings.get("cas_p_book")  # Пункт меню Книга заявок
         c_scrollbar = self.settings.get("cas_p_scrollbar")  # Ползунок скроллбара
         c_vol1 = self.settings.get("cas_p_vol1")
@@ -103,23 +116,25 @@ class CascadeWorker(QThread):
         c_close = self.settings.get("cas_p_close_x")
 
         # Отладка - выводим координаты
-        print(f"[CASCADE] Координаты:")
-        print(f"  Шестеренка (c_gear): {c_gear}")
-        print(f"  Левый ползунок (c_left_scrollbar): {c_left_scrollbar}")
-        print(f"  Книга заявок (c_book): {c_book}")
-        print(f"  Объем 1 (c_vol1): {c_vol1}")
-        print(f"  Комбобокс объема (c_combo): {c_combo}")
-        print(f"  Дистанция 1 (c_dist1): {c_dist1}")
-        print(f"  Объем 2 (c_vol2): {c_vol2}")
-        print(f"  Плюсик (c_plus): {c_plus}")
-        print(f"  Минус/Удалить (c_del): {c_del}")
-        print(f"  Закрыть настройки (c_close): {c_close}")
-        print(f"  Заявок для выставления: {len(self.orders)}")
+        logging.debug(
+            "[CASCADE] Points: gear=%s book=%s scrollbar=%s "
+            "vol1=%s dist1=%s vol2=%s combo=%s plus=%s delete=%s close=%s; orders=%s",
+            c_gear,
+            c_book,
+            c_scrollbar,
+            c_vol1,
+            c_dist1,
+            c_vol2,
+            c_combo,
+            c_plus,
+            c_del,
+            c_close,
+            len(self.orders),
+        )
 
         # Если не все точки заданы - стоп
         if not (
             c_gear
-            and c_left_scrollbar
             and c_book
             and c_vol1
             and c_dist1
@@ -127,9 +142,8 @@ class CascadeWorker(QThread):
             and c_plus
             and c_del
         ):
-            print("[CASCADE] Не заданы обязательные точки калибровки")
-            self.finished.emit()
-            return
+            logging.error("[CASCADE] Не заданы обязательные точки калибровки")
+            raise RuntimeError("Не заданы обязательные точки калибровки")
 
         row_height = c_vol2[1] - c_vol1[1]
         base_y = c_vol1[1]
@@ -180,7 +194,6 @@ class CascadeWorker(QThread):
             pyautogui.click()
             sleep_fast(delay_long)
 
-            # Сначала прокручиваем левую часть, как в рабочей старой версии.
             def _win_quick_drag(x1, y1, x2, y2, hold=0.02, press_delay=0.01):
                 import ctypes, time
 
@@ -192,63 +205,36 @@ class CascadeWorker(QThread):
                 time.sleep(hold)
                 user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
 
-            if check_cancel():
-                return
-            left_scrollbar_x = c_left_scrollbar[0]
-            left_scrollbar_y_start = c_left_scrollbar[1]
-            pyautogui.moveTo(left_scrollbar_x, left_scrollbar_y_start, duration=0)
-            try:
-                for y_offset in (0, -3):
-                    _win_quick_drag(
-                        left_scrollbar_x,
-                        left_scrollbar_y_start + y_offset,
-                        left_scrollbar_x,
-                        left_scrollbar_y_start + 900,
-                        hold=0.08,
-                        press_delay=0.025,
-                    )
-                    time.sleep(0.025)
-            except Exception:
-                pyautogui.mouseDown(button="left")
-                pyautogui.moveTo(
-                    left_scrollbar_x, left_scrollbar_y_start + 900, duration=0.04
-                )
-                pyautogui.mouseUp(button="left")
-            time.sleep(0.16)
-
-            # 3. Выбираем пункт "Книга заявок"
+            # 2. Выбираем пункт "Книга заявок"
             if check_cancel():
                 return
             pyautogui.moveTo(c_book[0], c_book[1])
             pyautogui.click()
             sleep_fast(delay_long)
 
-            # 4. Перетаскиваем правый ползунок вниз
+            # 3. Быстро перетаскиваем правый ползунок вниз
             if check_cancel():
                 return
             if c_scrollbar:
                 scrollbar_x = c_scrollbar[0]
                 scrollbar_y_start = c_scrollbar[1]
-
-                pyautogui.moveTo(scrollbar_x, scrollbar_y_start, duration=0)
                 try:
-                    pyautogui.click()
-                    time.sleep(0.03)
-                    pyautogui.dragTo(
-                        scrollbar_x,
-                        scrollbar_y_start + 1200,
-                        duration=0.2,
-                        button="left",
-                    )
-                except Exception:
                     _win_quick_drag(
                         scrollbar_x,
                         scrollbar_y_start,
                         scrollbar_x,
                         scrollbar_y_start + 1200,
-                        hold=0.1,
+                        hold=0.04,
+                        press_delay=0.01,
                     )
-                time.sleep(0.16)
+                except Exception:
+                    pyautogui.moveTo(scrollbar_x, scrollbar_y_start, duration=0)
+                    pyautogui.mouseDown(button="left")
+                    pyautogui.moveTo(
+                        scrollbar_x, scrollbar_y_start + 1200, duration=0.05
+                    )
+                    pyautogui.mouseUp(button="left")
+                time.sleep(0.06)
 
                 # === Speed-up non-slider actions ===
                 # Sliders already moved; now make subsequent actions faster (smaller sleeps/durations)
@@ -273,22 +259,24 @@ class CascadeWorker(QThread):
             del_clicks = max(0, base_count - 1)
             if del_clicks > 0:
                 base_y = c_vol2[1]
-            print(
-                f"[CASCADE] Шаг 5: Удаляю старые строки. Координаты: {c_del}, кликoв: {del_clicks}"
+            logging.debug(
+                "[CASCADE] Removing previous rows at %s; clicks=%s",
+                c_del,
+                del_clicks,
             )
             pyautogui.moveTo(c_del[0], c_del[1])
             for i in range(del_clicks):
                 if check_cancel():
                     return
-                print(f"[CASCADE]   Нажатие {i+1}/{del_clicks} на минус/удалить")
+                logging.debug("[CASCADE] Delete click %s/%s", i + 1, del_clicks)
                 pyautogui.click()
                 sleep_fast(delete_delay)
 
             # 5. Создаем нужное количество строк
             if check_cancel():
                 return
-            print(
-                f"[CASCADE] Шаг 6: Заполняю строки по одной. Высота строки: {row_height}"
+            logging.debug(
+                "[CASCADE] Filling order rows; row height=%s", row_height
             )
             plus_count = 0
             for i, order in enumerate(self.orders):
@@ -296,8 +284,12 @@ class CascadeWorker(QThread):
                     return
                 # После прокрутки новая строка ВСЕГДА оказывается на позиции base_y
                 cur_y = base_y
-                print(
-                    f"[CASCADE]   Заявка {i+1}: объем={order['vol']}, дистанция={order['dist']}%, Y={cur_y}"
+                logging.debug(
+                    "[CASCADE] Order %s: volume=%s distance=%s%% y=%s",
+                    i + 1,
+                    order["vol"],
+                    order["dist"],
+                    cur_y,
                 )
 
                 if i > 0:
@@ -307,7 +299,7 @@ class CascadeWorker(QThread):
                     pyautogui.click()
                     sleep_fast(delay_long)
                     # ВСЕГДА 2 раза вниз для прокрутки
-                    print(f"[CASCADE]     Нажимаю вниз 2 раза")
+                    logging.debug("[CASCADE] Moving down twice in volume selector")
                     if check_cancel():
                         return
                     for _ds in range(2):
@@ -329,8 +321,11 @@ class CascadeWorker(QThread):
 
                 # --- Объём ---
                 vol_str = str(order["vol"]).replace(",", ".")
-                print(
-                    f"[CASCADE]     Выставляю объем {vol_str} в координаты ({c_vol1[0]}, {cur_y})"
+                logging.debug(
+                    "[CASCADE] Entering volume %s at (%s, %s)",
+                    vol_str,
+                    c_vol1[0],
+                    cur_y,
                 )
                 pyperclip.copy(vol_str)
                 # Slightly longer pause to ensure clipboard is set before moving/clicking
@@ -390,9 +385,6 @@ class CascadeWorker(QThread):
                 else:
                     pyautogui.press("esc")
         finally:
-            # Всегда возвращаем интерфейс из состояния "выставляю ордера",
-            # включая отмену по ESC и неполную калибровку.
-            self.finished.emit()
             try:
                 pyautogui.mouseUp(button="left")
             except Exception:
@@ -1677,7 +1669,6 @@ class CascadeTab(QWidget):
         # Сбрасываем старые точки калибровки перед началом новой
         for key in [
             "cas_p_gear",
-            "cas_p_left_scrollbar",
             "cas_p_book",
             "cas_p_scrollbar",
             "cas_p_vol1",
@@ -1712,7 +1703,6 @@ class CascadeTab(QWidget):
             return False
 
         self.main.settings["cas_p_gear"] = None
-        self.main.settings["cas_p_left_scrollbar"] = None
         self.main.settings["cas_p_book"] = None
         self.main.settings["cas_p_scrollbar"] = None
         self.main.settings["cas_p_vol1"] = None
@@ -1746,56 +1736,51 @@ class CascadeTab(QWidget):
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 2:
-            self.main.settings["cas_p_left_scrollbar"] = [x, y]
+            self.main.settings["cas_p_book"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_3", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 3:
-            self.main.settings["cas_p_book"] = [x, y]
+            self.main.settings["cas_p_scrollbar"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_4", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 4:
-            self.main.settings["cas_p_scrollbar"] = [x, y]
+            self.main.settings["cas_p_vol1"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_5", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 5:
-            self.main.settings["cas_p_vol1"] = [x, y]
+            self.main.settings["cas_p_dist1"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_6", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 6:
-            self.main.settings["cas_p_dist1"] = [x, y]
+            self.main.settings["cas_p_vol2"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_7", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 7:
-            self.main.settings["cas_p_vol2"] = [x, y]
+            self.main.settings["cas_p_dist2"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_8", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 8:
-            self.main.settings["cas_p_dist2"] = [x, y]
+            self.main.settings["cas_p_btn_add"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_9", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 9:
-            self.main.settings["cas_p_btn_add"] = [x, y]
+            self.main.settings["cas_p_btn_del"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_10", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 10:
-            self.main.settings["cas_p_btn_del"] = [x, y]
+            self.main.settings["cas_p_combo_vol"] = [x, y]
             self.lbl_status.setText(self._t("casc_step_11", hotkey=hotkey_display))
             self.lbl_status.setStyleSheet("color: cyan;")
 
         elif self.calib_step == 11:
-            self.main.settings["cas_p_combo_vol"] = [x, y]
-            self.lbl_status.setText(self._t("casc_step_12", hotkey=hotkey_display))
-            self.lbl_status.setStyleSheet("color: cyan;")
-
-        elif self.calib_step == 12:
             self.main.settings["cas_p_close_x"] = [x, y]
             self.lbl_status.setText(self._t("casc_calib_done"))
             self.lbl_status.setStyleSheet("color: #38BE1D;")
@@ -1815,7 +1800,6 @@ class CascadeTab(QWidget):
 
         required_points = (
             self.main.settings.get("cas_p_gear"),
-            self.main.settings.get("cas_p_left_scrollbar"),
             self.main.settings.get("cas_p_book"),
             self.main.settings.get("cas_p_vol1"),
             self.main.settings.get("cas_p_dist1"),
@@ -1885,6 +1869,7 @@ class CascadeTab(QWidget):
         )
         self.worker.finished.connect(self._on_cascade_finished)
         self.worker.cancelled.connect(self._on_cascade_cancelled)
+        self.worker.failed.connect(self._on_cascade_failed)
         self.worker.start()
 
     def _restore_cursor_after_apply(self):
@@ -1950,13 +1935,19 @@ class CascadeTab(QWidget):
         self._clear_main_deposit_selection()
         QTimer.singleShot(7000, self._set_ready_status)
 
+    def _on_cascade_failed(self, error):
+        self.lbl_status.setText(self._t("casc_status_error", error=error))
+        self.lbl_status.setStyleSheet("color: #FF453A; font-size: 7pt;")
+        self.apply_active = False
+        self._restore_cursor_after_apply()
+        self._clear_main_deposit_selection()
+
     def is_apply_active(self):
         return bool(getattr(self, "apply_active", False))
 
     def _cascade_points_count(self):
         required = [
             "cas_p_gear",
-            "cas_p_left_scrollbar",
             "cas_p_book",
             "cas_p_scrollbar",
             "cas_p_vol1",
@@ -1993,7 +1984,7 @@ class CascadeTab(QWidget):
         if time.time() < float(getattr(self, "_cancel_status_until", 0.0) or 0.0):
             return
         points_count = self._cascade_points_count()
-        if points_count >= 12:
+        if points_count >= 11:
             self._set_ready_status()
             return
         if points_count > 0:

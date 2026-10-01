@@ -656,7 +656,6 @@ class RiskVolumeApp(QMainWindow):
             "fee_maker": 0.05,
             "use_fee": True,
             "cas_p_gear": None,
-            "cas_p_left_scrollbar": None,
             "cas_p_book": None,
             "cas_p_scrollbar": None,
             "cas_p_vol1": None,
@@ -5044,17 +5043,47 @@ class RiskVolumeApp(QMainWindow):
         self._hotkey_ids = {}
 
     def _register_hotkey(self, key_name, hotkey_text, callback, fallback):
+        previous_hotkey_id = self._hotkey_ids.get(key_name)
         try:
             hotkey_id = keyboard.add_hotkey(hotkey_text, callback)
-            self._hotkey_ids[key_name] = hotkey_id
-            self.settings[key_name] = hotkey_text
-            return
-        except Exception:
-            pass
+            registered_hotkey = hotkey_text
+        except Exception as requested_error:
+            if hotkey_text == fallback:
+                logging.exception(
+                    "Failed to register hotkey %s (%s)",
+                    key_name,
+                    hotkey_text,
+                )
+                return False
+            logging.warning(
+                "Failed to register hotkey %s (%s); trying fallback %s: %s",
+                key_name,
+                hotkey_text,
+                fallback,
+                requested_error,
+            )
+            try:
+                hotkey_id = keyboard.add_hotkey(fallback, callback)
+                registered_hotkey = fallback
+            except Exception:
+                logging.exception(
+                    "Failed to register fallback hotkey %s (%s)",
+                    key_name,
+                    fallback,
+                )
+                return False
 
-        hotkey_id = keyboard.add_hotkey(fallback, callback)
         self._hotkey_ids[key_name] = hotkey_id
-        self.settings[key_name] = fallback
+        self.settings[key_name] = registered_hotkey
+        if previous_hotkey_id is not None:
+            try:
+                keyboard.remove_hotkey(previous_hotkey_id)
+            except Exception:
+                logging.exception(
+                    "Failed to remove previous hotkey registration for %s",
+                    key_name,
+                )
+        return True
 
     def _delayed_rebind_hotkeys(self):
         """Отложенная регистрация горячих клавиш для избежания фоновых окон при старте."""
@@ -5090,24 +5119,23 @@ class RiskVolumeApp(QMainWindow):
 
     def rebind_hotkeys(self):
         if not self._ensure_keyboard_module():
-            return
+            logging.error("Cannot register hotkeys: keyboard module unavailable")
+            return False
 
         def normalize_hotkey(hotkey_value, fallback):
             value = str(hotkey_value or "").strip().lower()
             value = value.replace(" ", "")
             return value or fallback
 
-        self._clear_registered_hotkeys()
-
         # F1 - Скрыть/Показать
         hk_show = normalize_hotkey(self.settings.get("hk_show", "f1"), "f1")
-        self._register_hotkey(
+        show_registered = self._register_hotkey(
             "hk_show", hk_show, self.signaler.toggle_sig.emit, "f1"
         )
 
         # F2 - Калибровка (в зависимости от активной вкладки)
         hk_coords = normalize_hotkey(self.settings.get("hk_coords", "f2"), "f2")
-        self._register_hotkey(
+        coords_registered = self._register_hotkey(
             "hk_coords", hk_coords, self.signaler.calibrate_sig.emit, "f2"
         )
 
@@ -5115,13 +5143,14 @@ class RiskVolumeApp(QMainWindow):
         # keyboard.add_hotkey(
         #     self.settings.get("hk_send", "f3"), self.signaler.apply_sig.emit
         # )
+        return show_registered and coords_registered
 
     def _keepalive_hotkeys(self):
-        """Периодическая перерегистрация хуков — Windows убивает их при простое/сне."""
+        """Обновляет глобальные горячие клавиши, не оставляя их временно снятыми."""
         try:
             self.rebind_hotkeys()
         except Exception:
-            pass
+            logging.exception("Failed to refresh global hotkeys")
 
     def handle_hotkey_apply(self):
         # Защита от повторного входа (если один и тот же клавишный сигнал пришёл дважды)
